@@ -3,6 +3,19 @@
 #define VMA_IMPLEMENTATION
 #include <vk_mem_alloc.h>
 
+#include <glm.hpp>
+#include <gtc/matrix_transform.hpp>
+using glm::vec2;
+using glm::vec3;
+using glm::vec4;
+using glm::mat2;
+using glm::mat3;
+using glm::mat4;
+
+#define FAST_OBJ_IMPLEMENTATION
+#include <fast_obj.h>
+#include <meshoptimizer.h>
+
 #include <stdio.h>
 #include <vector>
 
@@ -288,7 +301,7 @@ struct SSwapchain
 
 VkSwapchainKHR CreateSwapchain(VkDevice Device, VkPhysicalDevice PhysicalDevice, VkSurfaceKHR Surface, VkFormat Format, const VkSurfaceCapabilitiesKHR& SurfaceCaps, VkSwapchainKHR OldSwapchain = 0)
 {
-	VkCompositeAlphaFlagBitsKHR compositeAlpha = (SurfaceCaps.supportedCompositeAlpha & VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR) ? VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR :
+	VkCompositeAlphaFlagBitsKHR CompositeAlpha = (SurfaceCaps.supportedCompositeAlpha & VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR) ? VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR :
 												 (SurfaceCaps.supportedCompositeAlpha & VK_COMPOSITE_ALPHA_PRE_MULTIPLIED_BIT_KHR) ? VK_COMPOSITE_ALPHA_PRE_MULTIPLIED_BIT_KHR :
 												 (SurfaceCaps.supportedCompositeAlpha & VK_COMPOSITE_ALPHA_POST_MULTIPLIED_BIT_KHR) ? VK_COMPOSITE_ALPHA_POST_MULTIPLIED_BIT_KHR :
  												  VK_COMPOSITE_ALPHA_INHERIT_BIT_KHR;
@@ -302,7 +315,7 @@ VkSwapchainKHR CreateSwapchain(VkDevice Device, VkPhysicalDevice PhysicalDevice,
 	CreateInfo.imageArrayLayers = 1;
 	CreateInfo.imageUsage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT;
 	CreateInfo.preTransform = VK_SURFACE_TRANSFORM_IDENTITY_BIT_KHR;
-	CreateInfo.compositeAlpha = compositeAlpha;
+	CreateInfo.compositeAlpha = CompositeAlpha;
 	CreateInfo.presentMode = VK_PRESENT_MODE_IMMEDIATE_KHR;//VK_PRESENT_MODE_FIFO_KHR;
 	CreateInfo.oldSwapchain = OldSwapchain;
 
@@ -506,22 +519,210 @@ VkShaderModule LoadShader(VkDevice Device, const char* Path)
 	return ShaderModule;
 }
 
-VkPipelineLayout CreatePipelineLayout(VkDevice Device)
+struct SBuffer
+{
+	VkBuffer Buffer;
+	VmaAllocation Allocation;
+};
+
+SBuffer CreateBuffer(VmaAllocator MemoryAllocator, VkDeviceSize Size, VkBufferUsageFlags BufferUsage, VmaMemoryUsage MemoryUsage)
+{
+	VkBufferCreateInfo BufferCreateInfo = { VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO };
+	BufferCreateInfo.size = Size;
+	BufferCreateInfo.usage = BufferUsage;
+
+	VmaAllocationCreateInfo AllocationCreateInfo = {};
+	AllocationCreateInfo.usage = MemoryUsage;
+
+	SBuffer Buffer = {};
+	VkCheck(vmaCreateBuffer(MemoryAllocator, &BufferCreateInfo, &AllocationCreateInfo, &Buffer.Buffer, &Buffer.Allocation, 0));
+	Assert(Buffer.Buffer);
+	Assert(Buffer.Allocation);
+
+	return Buffer;
+}
+
+void UpdateBufferData(VmaAllocator MemoryAllocator, SBuffer Buffer, void* Data, uint64_t Size)
+{
+	void* BufferPtr = 0;
+	VkCheck(vmaMapMemory(MemoryAllocator, Buffer.Allocation, &BufferPtr));
+	memcpy(BufferPtr, Data, Size);
+	vmaUnmapMemory(MemoryAllocator, Buffer.Allocation);
+}
+
+VkDescriptorPool CreateDescriptorPool(VkDevice Device)
+{
+	VkDescriptorPoolSize PoolSizes[] =
+	{
+		{ VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 10 },
+		{ VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 10 },
+	};
+
+	VkDescriptorPoolCreateInfo CreateInfo = { VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO };
+	CreateInfo.maxSets = 10;
+	CreateInfo.poolSizeCount = ArrayCount(PoolSizes);
+	CreateInfo.pPoolSizes = PoolSizes;
+
+	VkDescriptorPool DescriptorPool = 0;
+	VkCheck(vkCreateDescriptorPool(Device, &CreateInfo, 0, &DescriptorPool));
+	Assert(DescriptorPool);
+
+	return DescriptorPool;
+}
+
+VkDescriptorSet CreateDescriptorSet(VkDevice Device, VkDescriptorPool DescriptorPool, VkDescriptorSetLayout DescriptorSetLayout)
+{
+	VkDescriptorSetAllocateInfo DescriptorSetAllocateInfo = { VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO };
+	DescriptorSetAllocateInfo.descriptorPool = DescriptorPool;
+	DescriptorSetAllocateInfo.descriptorSetCount = 1;
+	DescriptorSetAllocateInfo.pSetLayouts = &DescriptorSetLayout;
+
+	VkDescriptorSet DescriptorSet = 0;
+	VkCheck(vkAllocateDescriptorSets(Device, &DescriptorSetAllocateInfo, &DescriptorSet));
+	Assert(DescriptorSet);
+
+	return DescriptorSet;
+}
+
+void UpdateDescriptorSet(VkDevice Device, VkDescriptorSet DescriptorSet, uint32_t Binding, VkDescriptorType DescriptorType, SBuffer Buffer, VkDeviceSize BufferRange)
+{
+	VkDescriptorBufferInfo BufferInfo = {};
+	BufferInfo.buffer = Buffer.Buffer;
+	BufferInfo.range = BufferRange;
+
+	VkWriteDescriptorSet DescriptorWrite = { VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET };
+	DescriptorWrite.dstSet = DescriptorSet;
+	DescriptorWrite.dstBinding = 0;
+	DescriptorWrite.descriptorCount = 1;
+	DescriptorWrite.descriptorType = DescriptorType;
+	DescriptorWrite.pBufferInfo = &BufferInfo;
+	
+	vkUpdateDescriptorSets(Device, 1, &DescriptorWrite, 0, 0);
+}
+
+VkDescriptorSetLayoutBinding CreateDescriptorSetLayoutBinding(uint32_t Binding, VkDescriptorType DescriptorType, VkShaderStageFlags StageFlags)
+{
+	VkDescriptorSetLayoutBinding SetLayoutBinding = {};
+	SetLayoutBinding.binding = Binding;
+	SetLayoutBinding.descriptorType = DescriptorType;
+	SetLayoutBinding.descriptorCount = 1;
+	SetLayoutBinding.stageFlags = StageFlags;
+
+	return SetLayoutBinding;
+}
+
+VkDescriptorSetLayout CreateDescriptorSetLayout(VkDevice Device, uint32_t SetBindingsCount, const VkDescriptorSetLayoutBinding* SetBindings)
+{
+	VkDescriptorSetLayoutCreateInfo CreateInfo = { VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO };
+	CreateInfo.bindingCount = SetBindingsCount;
+	CreateInfo.pBindings = SetBindings;
+
+	VkDescriptorSetLayout SetLayout = 0;
+	VkCheck(vkCreateDescriptorSetLayout(Device, &CreateInfo, 0, &SetLayout));
+	Assert(SetLayout);
+
+	return SetLayout;
+}
+
+VkPipelineLayout CreatePipelineLayout(VkDevice Device, uint32_t SetLayoutCount, const VkDescriptorSetLayout* SetLayouts)
 {
 	VkPipelineLayoutCreateInfo CreateInfo = { VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO };
+	CreateInfo.setLayoutCount = SetLayoutCount;
+	CreateInfo.pSetLayouts = SetLayouts;
 
 	VkPipelineLayout PipelineLayout = 0;
 	VkCheck(vkCreatePipelineLayout(Device, &CreateInfo, 0, &PipelineLayout));
-	assert(PipelineLayout);
+	Assert(PipelineLayout);
 
 	return PipelineLayout;
 }
 
 struct SVertex
 {
-	float px, py, pz;
-	float nx, ny, nz;
+	vec3 Position;
+	vec3 Normal;
 };
+
+struct SMesh
+{
+	std::vector<SVertex> Vertices;
+	std::vector<uint32_t> Indices;
+
+	SBuffer VertexBuffer;
+	SBuffer IndexBuffer;
+};
+
+SMesh LoadMesh(VmaAllocator MemoryAllocator, const char* Path)
+{
+	SMesh Mesh = {};
+
+	fastObjMesh* File = fast_obj_read(Path);
+	Assert(File);
+
+	size_t IndexCount = 0;
+	for (uint32_t I = 0; I < File->face_count; I++)
+	{
+		Assert((File->face_vertices[I] == 3) || (File->face_vertices[I] == 4));
+		IndexCount += (size_t)3 * (File->face_vertices[I] - 2);
+	}
+
+	size_t VertexOffset = 0;
+	size_t IndexOffset = 0;
+	std::vector<SVertex> Vertices(IndexCount);
+	for (uint32_t I = 0; I < File->face_count; I++)
+	{
+		for (uint32_t J = 0; J < File->face_vertices[I]; J++)
+		{
+			if (J >= 3)
+			{
+				Vertices[VertexOffset] = Vertices[VertexOffset - 3];
+				Vertices[VertexOffset + 1] = Vertices[VertexOffset - 1];
+				VertexOffset += 2;
+			}
+
+			SVertex& Vertex = Vertices[VertexOffset++];
+
+			int PosIndex = File->indices[IndexOffset].p;
+			int NorIndex = File->indices[IndexOffset].n;
+
+			float px = File->positions[3 * PosIndex];
+			float py = File->positions[3 * PosIndex + 1];
+			float pz = File->positions[3 * PosIndex + 2];
+
+			float nx = (NorIndex < 0) ? 0.0f : File->normals[3 * NorIndex];
+			float ny = (NorIndex < 0) ? 0.0f : File->normals[3 * NorIndex + 1];
+			float nz = (NorIndex < 0) ? 1.0f : File->normals[3 * NorIndex + 2];
+
+			Vertex.Position = vec3(px, py, pz);
+			Vertex.Normal = vec3(nx, ny, nz);
+
+			IndexOffset++;
+		}
+	}
+	Assert(VertexOffset == IndexCount);
+
+	std::vector<uint32_t> Remap(IndexCount);
+	size_t UniqueVertices = meshopt_generateVertexRemap(Remap.data(), 0, IndexCount, Vertices.data(), IndexCount, sizeof(SVertex));
+
+	Mesh.Vertices.resize(UniqueVertices);
+	Mesh.Indices.resize(IndexCount);
+
+	meshopt_remapVertexBuffer(Mesh.Vertices.data(), Vertices.data(), IndexCount, sizeof(SVertex), Remap.data());
+	meshopt_remapIndexBuffer(Mesh.Indices.data(), 0, IndexCount, Remap.data());
+
+	fast_obj_destroy(File);
+
+	SBuffer VertexBuffer = CreateBuffer(MemoryAllocator, Mesh.Vertices.size() * sizeof(SVertex), VK_BUFFER_USAGE_VERTEX_BUFFER_BIT, VMA_MEMORY_USAGE_CPU_TO_GPU);
+	UpdateBufferData(MemoryAllocator, VertexBuffer, Mesh.Vertices.data(), Mesh.Vertices.size() * sizeof(SVertex));
+	
+	SBuffer IndexBuffer = CreateBuffer(MemoryAllocator, Mesh.Indices.size() * sizeof(uint32_t), VK_BUFFER_USAGE_INDEX_BUFFER_BIT, VMA_MEMORY_USAGE_CPU_TO_GPU);
+	UpdateBufferData(MemoryAllocator, IndexBuffer, Mesh.Indices.data(), Mesh.Indices.size() * sizeof(uint32_t));
+
+	Mesh.VertexBuffer = VertexBuffer;
+	Mesh.IndexBuffer = IndexBuffer;
+
+	return Mesh;
+}
 
 VkPipeline CreateGraphicsPipeline(VkDevice Device, VkRenderPass RenderPass, VkPipelineLayout PipelineLayout, VkShaderModule VS, VkShaderModule FS)
 {
@@ -548,7 +749,7 @@ VkPipeline CreateGraphicsPipeline(VkDevice Device, VkRenderPass RenderPass, VkPi
 	AttributeDescrs[1].location = 1;
 	AttributeDescrs[1].binding = 0;
 	AttributeDescrs[1].format = VK_FORMAT_R32G32B32_SFLOAT;
-	AttributeDescrs[1].offset = OffsetOf(SVertex, nx);
+	AttributeDescrs[1].offset = OffsetOf(SVertex, Normal);
 
 	VkPipelineVertexInputStateCreateInfo VertexInputInfo = { VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO };
 	VertexInputInfo.vertexBindingDescriptionCount = 1;
@@ -611,28 +812,11 @@ VkPipeline CreateGraphicsPipeline(VkDevice Device, VkRenderPass RenderPass, VkPi
 	return GraphicsPipeline;
 }
 
-struct SBuffer
+struct SCameraBuffer
 {
-	VkBuffer Buffer;
-	VmaAllocation Allocation;
+	mat4 View;
+	mat4 Proj;
 };
-
-SBuffer CreateBuffer(VmaAllocator MemoryAllocator, VkDeviceSize Size, VkBufferUsageFlags BufferUsage, VmaMemoryUsage MemoryUsage)
-{
-	VkBufferCreateInfo BufferCreateInfo = { VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO };
-	BufferCreateInfo.size = Size;
-	BufferCreateInfo.usage = BufferUsage;
-
-	VmaAllocationCreateInfo AllocationCreateInfo = {};
-	AllocationCreateInfo.usage = MemoryUsage;
-
-	SBuffer Buffer = {};
-	VkCheck(vmaCreateBuffer(MemoryAllocator, &BufferCreateInfo, &AllocationCreateInfo, &Buffer.Buffer, &Buffer.Allocation, 0));
-	assert(Buffer.Buffer);
-	assert(Buffer.Allocation);
-
-	return Buffer;
-}
 
 int main()
 {
@@ -677,29 +861,32 @@ int main()
 
 			VkShaderModule VS = LoadShader(Device, "shaders_bytecode\\default.vert.spv");
 			VkShaderModule FS = LoadShader(Device, "shaders_bytecode\\default.frag.spv");
+			
+			VkDescriptorPool DescriptorPool = CreateDescriptorPool(Device);
 
-			VkPipelineLayout PipelineLayout = CreatePipelineLayout(Device);
+			VkDescriptorSetLayoutBinding DescriptorSetLayoutBinding = CreateDescriptorSetLayoutBinding(0, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, VK_SHADER_STAGE_VERTEX_BIT);
+			VkDescriptorSetLayout DescriptorSetLayout = CreateDescriptorSetLayout(Device, 1, &DescriptorSetLayoutBinding);
+
+			VkDescriptorSet DescriptorSet = CreateDescriptorSet(Device, DescriptorPool, DescriptorSetLayout);
+			SBuffer DescriptorSetBindingBuffer = CreateBuffer(MemoryAllocator, 2*sizeof(mat4), VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT, VMA_MEMORY_USAGE_CPU_TO_GPU);
+			UpdateDescriptorSet(Device, DescriptorSet, 0, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, DescriptorSetBindingBuffer, 2*sizeof(mat4));
+
+			VkPipelineLayout PipelineLayout = CreatePipelineLayout(Device, 1, &DescriptorSetLayout);
 
 			VkPipeline GraphicsPipeline = CreateGraphicsPipeline(Device, RenderPass, PipelineLayout, VS, FS);
 
-			SVertex TriangleVertices[] =
-			{
-				{ -0.5f, -0.5f, 0.0f, 0.0f, 0.0f, 0.0f },
-				{ 0.0f, 0.5f, 0.0f, 0.0f, 0.0f, 0.0f },
-				{ 0.5f, -0.5f, 0.0f, 0.0f, 0.0f, 0.0f }
-			};
-			SBuffer VertexBuffer = CreateBuffer(MemoryAllocator, sizeof(TriangleVertices), VK_BUFFER_USAGE_VERTEX_BUFFER_BIT, VMA_MEMORY_USAGE_CPU_TO_GPU);
-			
-			void* VertexBufferPtr;
-			VkCheck(vmaMapMemory(MemoryAllocator, VertexBuffer.Allocation, &VertexBufferPtr));
-			memcpy(VertexBufferPtr, TriangleVertices, sizeof(TriangleVertices));
-			vmaUnmapMemory(MemoryAllocator, VertexBuffer.Allocation);
+			SMesh KittenMesh = LoadMesh(MemoryAllocator, "meshes\\kitten.obj");
 
 			while (!glfwWindowShouldClose(Window))
 			{
 				glfwPollEvents();
 
 				ResizeSwapchainIfChanged(Swapchain, Device, PhysicalDevice, Surface, SwapchainFormat, DepthFormat, RenderPass, MemoryAllocator);
+
+				SCameraBuffer CameraBufferData = {};
+				CameraBufferData.View = glm::lookAt(vec3(0.0f, 0.0f, 1.0f), vec3(0.0f), vec3(0.0f, 1.0f, 0.0f));
+				CameraBufferData.Proj = glm::perspective(90.0f, float(Swapchain.Width) / float(Swapchain.Height), 0.1f, FLT_MAX);
+				UpdateBufferData(MemoryAllocator, DescriptorSetBindingBuffer, &CameraBufferData, sizeof(CameraBufferData));
 
 				uint32_t ImageIndex = 0;
 				VkCheck(vkAcquireNextImageKHR(Device, Swapchain.VkSwapchain, UINT64_MAX, AcquireSemaphore, VK_NULL_HANDLE, &ImageIndex));
@@ -732,10 +919,13 @@ int main()
 
 				vkCmdBindPipeline(CommandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, GraphicsPipeline);
 
-				VkDeviceSize Offset = 0;
-				vkCmdBindVertexBuffers(CommandBuffer, 0, 1, &VertexBuffer.Buffer, &Offset);
+				vkCmdBindDescriptorSets(CommandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, PipelineLayout, 0, 1, &DescriptorSet, 0, 0);
 
-				vkCmdDraw(CommandBuffer, 3, 1, 0, 0);
+				VkDeviceSize Offset = 0;
+				vkCmdBindVertexBuffers(CommandBuffer, 0, 1, &KittenMesh.VertexBuffer.Buffer, &Offset);
+				vkCmdBindIndexBuffer(CommandBuffer, KittenMesh.IndexBuffer.Buffer, 0, VK_INDEX_TYPE_UINT32);
+
+				vkCmdDrawIndexed(CommandBuffer, KittenMesh.Indices.size(), 1, 0, 0, 0);
 
 				vkCmdEndRenderPass(CommandBuffer);
 
