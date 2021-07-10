@@ -539,6 +539,7 @@ struct SBuffer
 {
 	VkBuffer Buffer;
 	VmaAllocation Allocation;
+	void* Data;
 };
 
 SBuffer CreateBuffer(VmaAllocator MemoryAllocator, VkDeviceSize Size, VkBufferUsageFlags BufferUsage, VmaMemoryUsage MemoryUsage)
@@ -555,15 +556,37 @@ SBuffer CreateBuffer(VmaAllocator MemoryAllocator, VkDeviceSize Size, VkBufferUs
 	Assert(Buffer.Buffer);
 	Assert(Buffer.Allocation);
 
+	void* Data = 0;
+	if ((MemoryUsage == VMA_MEMORY_USAGE_CPU_TO_GPU) || (MemoryUsage == VMA_MEMORY_USAGE_CPU_ONLY))
+		vmaMapMemory(MemoryAllocator, Buffer.Allocation, &Data);
+	Buffer.Data = Data;
+
 	return Buffer;
 }
 
-void UpdateBufferData(VmaAllocator MemoryAllocator, SBuffer Buffer, void* Data, uint64_t Size)
+void UploadBuffer(VkDevice Device, VkCommandPool CommandPool, VkCommandBuffer CommandBuffer, VkQueue Queue, const SBuffer& Buffer, const SBuffer& StagingBuffer, void *Data, uint64_t Size)
 {
-	void* BufferPtr = 0;
-	VkCheck(vmaMapMemory(MemoryAllocator, Buffer.Allocation, &BufferPtr));
-	memcpy(BufferPtr, Data, Size);
-	vmaUnmapMemory(MemoryAllocator, Buffer.Allocation);
+	Assert(StagingBuffer.Data);
+	memcpy(StagingBuffer.Data, Data, Size);
+
+	VkCheck(vkResetCommandPool(Device, CommandPool, 0));
+
+	VkCommandBufferBeginInfo BeginInfo = { VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO };
+	BeginInfo.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+
+	VkCheck(vkBeginCommandBuffer(CommandBuffer, &BeginInfo));
+
+	VkBufferCopy CopyRegion = { 0, 0, Size };
+	vkCmdCopyBuffer(CommandBuffer, StagingBuffer.Buffer, Buffer.Buffer, 1, &CopyRegion);
+
+	VkCheck(vkEndCommandBuffer(CommandBuffer));
+
+	VkSubmitInfo SubmitInfo = { VK_STRUCTURE_TYPE_SUBMIT_INFO };
+	SubmitInfo.commandBufferCount = 1;
+	SubmitInfo.pCommandBuffers = &CommandBuffer;
+	VkCheck(vkQueueSubmit(Queue, 1, &SubmitInfo, 0));
+
+	VkCheck(vkDeviceWaitIdle(Device));
 }
 
 VkDescriptorPool CreateDescriptorPool(VkDevice Device)
@@ -688,9 +711,6 @@ struct SMesh
 {
 	std::vector<SVertex> Vertices;
 	std::vector<uint32_t> Indices;
-
-	SBuffer VertexBuffer;
-	SBuffer IndexBuffer;
 };
 
 SMesh LoadMesh(VmaAllocator MemoryAllocator, const char* Path)
@@ -752,15 +772,6 @@ SMesh LoadMesh(VmaAllocator MemoryAllocator, const char* Path)
 	meshopt_remapIndexBuffer(Mesh.Indices.data(), 0, IndexCount, Remap.data());
 
 	fast_obj_destroy(File);
-
-	SBuffer VertexBuffer = CreateBuffer(MemoryAllocator, Mesh.Vertices.size() * sizeof(SVertex), VK_BUFFER_USAGE_VERTEX_BUFFER_BIT, VMA_MEMORY_USAGE_CPU_TO_GPU);
-	UpdateBufferData(MemoryAllocator, VertexBuffer, Mesh.Vertices.data(), Mesh.Vertices.size() * sizeof(SVertex));
-	
-	SBuffer IndexBuffer = CreateBuffer(MemoryAllocator, Mesh.Indices.size() * sizeof(uint32_t), VK_BUFFER_USAGE_INDEX_BUFFER_BIT, VMA_MEMORY_USAGE_CPU_TO_GPU);
-	UpdateBufferData(MemoryAllocator, IndexBuffer, Mesh.Indices.data(), Mesh.Indices.size() * sizeof(uint32_t));
-
-	Mesh.VertexBuffer = VertexBuffer;
-	Mesh.IndexBuffer = IndexBuffer;
 
 	return Mesh;
 }
@@ -909,10 +920,16 @@ int main()
 			UpdateDescriptorSet(Device, DescriptorSet, 0, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, DescriptorSetBindingBuffer, 2*sizeof(mat4));
 
 			VkPipelineLayout PipelineLayout = CreatePipelineLayout(Device, 1, &DescriptorSetLayout);
-
 			VkPipeline GraphicsPipeline = CreateGraphicsPipeline(Device, RenderPass, PipelineLayout, VS, FS);
 
+			SBuffer StagingBuffer = CreateBuffer(MemoryAllocator, 64 * 1024 * 1024, VK_BUFFER_USAGE_TRANSFER_SRC_BIT, VMA_MEMORY_USAGE_CPU_ONLY);
+			SBuffer VertexBuffer = CreateBuffer(MemoryAllocator, 64 * 1024 * 1024, VK_BUFFER_USAGE_VERTEX_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT, VMA_MEMORY_USAGE_GPU_ONLY);
+			SBuffer IndexBuffer = CreateBuffer(MemoryAllocator, 64 * 1024 * 1024, VK_BUFFER_USAGE_INDEX_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT, VMA_MEMORY_USAGE_GPU_ONLY);
+
 			SMesh KittenMesh = LoadMesh(MemoryAllocator, "meshes\\kitten.obj");
+
+			UploadBuffer(Device, CommandPool, CommandBuffer, GraphicsQueue, VertexBuffer, StagingBuffer, KittenMesh.Vertices.data(), KittenMesh.Vertices.size() * sizeof(SVertex));
+			UploadBuffer(Device, CommandPool, CommandBuffer, GraphicsQueue, IndexBuffer, StagingBuffer, KittenMesh.Indices.data(), KittenMesh.Indices.size() * sizeof(uint32_t));
 
 			const uint32_t ObjectsCount = 10000;
 			std::vector<SObject> Objects(ObjectsCount);
@@ -946,7 +963,7 @@ int main()
 				SCameraBuffer CameraBufferData = {};
 				CameraBufferData.View = glm::lookAt(vec3(0.0f, 0.0f, 3.0f), vec3(0.0f), vec3(0.0f, 1.0f, 0.0f));
 				CameraBufferData.Proj = glm::perspective(70.0f, float(Swapchain.Width) / float(Swapchain.Height), 0.1f, FLT_MAX);
-				UpdateBufferData(MemoryAllocator, DescriptorSetBindingBuffer, &CameraBufferData, sizeof(CameraBufferData));
+				memcpy(DescriptorSetBindingBuffer.Data, &CameraBufferData, sizeof(CameraBufferData));
 
 				uint32_t ImageIndex = 0;
 				VkCheck(vkAcquireNextImageKHR(Device, Swapchain.VkSwapchain, UINT64_MAX, AcquireSemaphore, VK_NULL_HANDLE, &ImageIndex));
@@ -985,8 +1002,8 @@ int main()
 				vkCmdBindDescriptorSets(CommandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, PipelineLayout, 0, 1, &DescriptorSet, 0, 0);
 
 				VkDeviceSize Offset = 0;
-				vkCmdBindVertexBuffers(CommandBuffer, 0, 1, &KittenMesh.VertexBuffer.Buffer, &Offset);
-				vkCmdBindIndexBuffer(CommandBuffer, KittenMesh.IndexBuffer.Buffer, 0, VK_INDEX_TYPE_UINT32);
+				vkCmdBindVertexBuffers(CommandBuffer, 0, 1, &VertexBuffer.Buffer, &Offset);
+				vkCmdBindIndexBuffer(CommandBuffer, IndexBuffer.Buffer, 0, VK_INDEX_TYPE_UINT32);
 
 				for (uint32_t I = 0; I < ObjectsCount; I++)
 				{
