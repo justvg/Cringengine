@@ -474,6 +474,19 @@ VkSemaphore CreateSemaphore(VkDevice Device)
 	return Semaphore;
 }
 
+VkQueryPool CreateQueryPool(VkDevice Device)
+{
+	VkQueryPoolCreateInfo CreateInfo = { VK_STRUCTURE_TYPE_QUERY_POOL_CREATE_INFO };
+	CreateInfo.queryType = VK_QUERY_TYPE_TIMESTAMP;
+	CreateInfo.queryCount = 2;
+
+	VkQueryPool QueryPool = 0;
+	VkCheck(vkCreateQueryPool(Device, &CreateInfo, 0, &QueryPool));
+	Assert(QueryPool);
+
+	return QueryPool;
+}
+
 VkImageMemoryBarrier CreateImageMemoryBarrier(VkAccessFlags SrcAccessMask, VkAccessFlags DstAccessMask, VkImageLayout OldLayout, VkImageLayout NewLayout, VkImage Image, VkImageAspectFlags AspectMask)
 {
 	VkImageMemoryBarrier Barrier = { VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER };
@@ -859,6 +872,8 @@ int main()
 			VkSemaphore AcquireSemaphore = CreateSemaphore(Device);
 			VkSemaphore ReleaseSemaphore = CreateSemaphore(Device);
 
+			VkQueryPool QueryPool = CreateQueryPool(Device);
+
 			VkShaderModule VS = LoadShader(Device, "shaders_bytecode\\default.vert.spv");
 			VkShaderModule FS = LoadShader(Device, "shaders_bytecode\\default.frag.spv");
 			
@@ -877,8 +892,12 @@ int main()
 
 			SMesh KittenMesh = LoadMesh(MemoryAllocator, "meshes\\kitten.obj");
 
+			double FrameCpuTimeAverage = 0.0f;
+			double FrameGpuTimeAverage = 0.0f;
 			while (!glfwWindowShouldClose(Window))
 			{
+				double FrameCpuBeginTime = glfwGetTime();
+
 				glfwPollEvents();
 
 				ResizeSwapchainIfChanged(Swapchain, Device, PhysicalDevice, Surface, SwapchainFormat, DepthFormat, RenderPass, MemoryAllocator);
@@ -896,6 +915,9 @@ int main()
 				VkCommandBufferBeginInfo CommandBufferBeginInfo = { VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO };
 				CommandBufferBeginInfo.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
 				VkCheck(vkBeginCommandBuffer(CommandBuffer, &CommandBufferBeginInfo));
+
+				vkCmdResetQueryPool(CommandBuffer, QueryPool, 0, 2);
+				vkCmdWriteTimestamp(CommandBuffer, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, QueryPool, 0);
 
 				VkViewport Viewport = { 0.0f, float(Swapchain.Height), float(Swapchain.Width), -float(Swapchain.Height), 0.0f, 1.0f };
 				VkRect2D Scissor = { {0, 0}, {Swapchain.Width, Swapchain.Height} };
@@ -932,6 +954,8 @@ int main()
 				VkImageMemoryBarrier RenderEndBarrier = CreateImageMemoryBarrier(VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT, 0, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, VK_IMAGE_LAYOUT_PRESENT_SRC_KHR, Swapchain.Images[ImageIndex], VK_IMAGE_ASPECT_COLOR_BIT);
 				vkCmdPipelineBarrier(CommandBuffer, VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_DEPENDENCY_BY_REGION_BIT, 0, 0, 0, 0, 1, &RenderEndBarrier);
 
+				vkCmdWriteTimestamp(CommandBuffer, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, QueryPool, 1);
+
 				VkCheck(vkEndCommandBuffer(CommandBuffer));
 
 				VkPipelineStageFlags SubmitWaitStage = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
@@ -954,6 +978,24 @@ int main()
 				VkCheck(vkQueuePresentKHR(GraphicsQueue, &PresentInfo));
 
 				VkCheck(vkDeviceWaitIdle(Device));
+
+				uint64_t Timestamps[2] = {};
+				VkCheck(vkGetQueryPoolResults(Device, QueryPool, 0, ArrayCount(Timestamps), sizeof(Timestamps), Timestamps, sizeof(Timestamps[0]), VK_QUERY_RESULT_64_BIT));
+
+				double FrameGpuBeginTime = double(Timestamps[0]) * PhysicalDeviceProps.limits.timestampPeriod * 1e-6;
+				double FrameGpuEndTime = double(Timestamps[1]) * PhysicalDeviceProps.limits.timestampPeriod * 1e-6;
+				double FrameGpuTime = FrameGpuEndTime - FrameGpuBeginTime;
+
+				double FrameCpuEndTime = glfwGetTime();
+				double FrameCpuTime = 1000.0*(FrameCpuEndTime - FrameCpuBeginTime);
+
+				FrameCpuTimeAverage = 0.95*FrameCpuTimeAverage + 0.05*FrameCpuTime;
+				FrameGpuTimeAverage = 0.95*FrameGpuTimeAverage + 0.05*FrameGpuTime;
+
+				char Title[256];
+				sprintf(Title, "cpu: %.2f ms; gpu: %.2f ms", FrameCpuTimeAverage, FrameGpuTimeAverage);
+
+				glfwSetWindowTitle(Window, Title);
 			}
 		}
 		else
