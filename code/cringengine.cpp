@@ -4,6 +4,8 @@
 #include <vk_mem_alloc.h>
 
 #include <glm.hpp>
+#include <ext/quaternion_float.hpp>
+#include <ext/quaternion_transform.hpp>
 #include <gtc/matrix_transform.hpp>
 using glm::vec2;
 using glm::vec3;
@@ -11,6 +13,7 @@ using glm::vec4;
 using glm::mat2;
 using glm::mat3;
 using glm::mat4;
+using glm::quat;
 
 #define FAST_OBJ_IMPLEMENTATION
 #include <fast_obj.h>
@@ -637,11 +640,36 @@ VkDescriptorSetLayout CreateDescriptorSetLayout(VkDevice Device, uint32_t SetBin
 	return SetLayout;
 }
 
+struct SCameraBuffer
+{
+	mat4 View;
+	mat4 Proj;
+};
+
+struct SObjectTransform
+{
+	vec3 Position;
+	float Scale;
+	quat Orientation;
+};
+
+struct SObject
+{
+	SObjectTransform Transform;
+};
+
 VkPipelineLayout CreatePipelineLayout(VkDevice Device, uint32_t SetLayoutCount, const VkDescriptorSetLayout* SetLayouts)
 {
+	VkPushConstantRange PushConstantRange = {};
+	PushConstantRange.stageFlags = VK_SHADER_STAGE_VERTEX_BIT;
+	PushConstantRange.offset = 0;
+	PushConstantRange.size = sizeof(SObjectTransform);
+
 	VkPipelineLayoutCreateInfo CreateInfo = { VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO };
 	CreateInfo.setLayoutCount = SetLayoutCount;
 	CreateInfo.pSetLayouts = SetLayouts;
+	CreateInfo.pushConstantRangeCount = 1;
+	CreateInfo.pPushConstantRanges = &PushConstantRange;
 
 	VkPipelineLayout PipelineLayout = 0;
 	VkCheck(vkCreatePipelineLayout(Device, &CreateInfo, 0, &PipelineLayout));
@@ -825,12 +853,6 @@ VkPipeline CreateGraphicsPipeline(VkDevice Device, VkRenderPass RenderPass, VkPi
 	return GraphicsPipeline;
 }
 
-struct SCameraBuffer
-{
-	mat4 View;
-	mat4 Proj;
-};
-
 int main()
 {
 	if (glfwInit())
@@ -892,6 +914,25 @@ int main()
 
 			SMesh KittenMesh = LoadMesh(MemoryAllocator, "meshes\\kitten.obj");
 
+			const uint32_t ObjectsCount = 10000;
+			std::vector<SObject> Objects(ObjectsCount);
+
+			const float SceneRadius = 100.0f;
+			for (uint32_t I = 0; I < ObjectsCount; I++)
+			{
+				SObject& Object = Objects[I];
+
+				Object.Transform.Position.x = 2.0f * SceneRadius * (float(rand()) / RAND_MAX) - SceneRadius;
+				Object.Transform.Position.y = 2.0f * SceneRadius * (float(rand()) / RAND_MAX) - SceneRadius;
+				Object.Transform.Position.z = 2.0f * SceneRadius * (float(rand()) / RAND_MAX) - SceneRadius;
+
+				Object.Transform.Scale = ((float(rand()) / RAND_MAX) + 1) * 2;
+
+				float Angle = glm::radians(90.0f * (float(rand()) / RAND_MAX));
+				vec3 Axis = vec3((float(rand()) / RAND_MAX) * 2 - 1, (float(rand()) / RAND_MAX) * 2 - 1, (float(rand()) / RAND_MAX) * 2 - 1);
+				Object.Transform.Orientation = glm::rotate(quat(1, 0, 0, 0), Angle, Axis);
+			}
+
 			double FrameCpuTimeAverage = 0.0f;
 			double FrameGpuTimeAverage = 0.0f;
 			while (!glfwWindowShouldClose(Window))
@@ -903,8 +944,8 @@ int main()
 				ResizeSwapchainIfChanged(Swapchain, Device, PhysicalDevice, Surface, SwapchainFormat, DepthFormat, RenderPass, MemoryAllocator);
 
 				SCameraBuffer CameraBufferData = {};
-				CameraBufferData.View = glm::lookAt(vec3(0.0f, 0.0f, 1.0f), vec3(0.0f), vec3(0.0f, 1.0f, 0.0f));
-				CameraBufferData.Proj = glm::perspective(90.0f, float(Swapchain.Width) / float(Swapchain.Height), 0.1f, FLT_MAX);
+				CameraBufferData.View = glm::lookAt(vec3(0.0f, 0.0f, 3.0f), vec3(0.0f), vec3(0.0f, 1.0f, 0.0f));
+				CameraBufferData.Proj = glm::perspective(70.0f, float(Swapchain.Width) / float(Swapchain.Height), 0.1f, FLT_MAX);
 				UpdateBufferData(MemoryAllocator, DescriptorSetBindingBuffer, &CameraBufferData, sizeof(CameraBufferData));
 
 				uint32_t ImageIndex = 0;
@@ -947,7 +988,11 @@ int main()
 				vkCmdBindVertexBuffers(CommandBuffer, 0, 1, &KittenMesh.VertexBuffer.Buffer, &Offset);
 				vkCmdBindIndexBuffer(CommandBuffer, KittenMesh.IndexBuffer.Buffer, 0, VK_INDEX_TYPE_UINT32);
 
-				vkCmdDrawIndexed(CommandBuffer, KittenMesh.Indices.size(), 1, 0, 0, 0);
+				for (uint32_t I = 0; I < ObjectsCount; I++)
+				{
+					vkCmdPushConstants(CommandBuffer, PipelineLayout, VK_SHADER_STAGE_VERTEX_BIT, 0, sizeof(SObjectTransform), &Objects[I].Transform);
+					vkCmdDrawIndexed(CommandBuffer, KittenMesh.Indices.size(), 1, 0, 0, 0);
+				}
 
 				vkCmdEndRenderPass(CommandBuffer);
 

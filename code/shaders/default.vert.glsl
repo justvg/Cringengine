@@ -11,8 +11,20 @@ layout (set = 0, binding = 0) uniform CameraBuffer
 	mat4 Proj;
 };
 
+layout (push_constant) uniform PushConstants
+{
+	vec3 Position;
+	float Scale;
+	vec4 Orientation;
+};
+
+vec3 RotateQuaternion(vec3 V, vec4 Q)
+{
+	return V + 2.0 * cross(Q.xyz, cross(Q.xyz, V) + Q.w * V);
+}
+
 void main()
 {
 	Color = LocalNormal;
-	gl_Position = Proj * View * vec4(LocalPosition, 1.0);
+	gl_Position = Proj * View * vec4(RotateQuaternion(LocalPosition * Scale, Orientation) + Position, 1.0);
 }
