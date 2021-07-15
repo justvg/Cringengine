@@ -680,11 +680,6 @@ struct SObjectTransform
 	quat Orientation;
 };
 
-struct SObject
-{
-	SObjectTransform Transform;
-};
-
 VkPipelineLayout CreatePipelineLayout(VkDevice Device, uint32_t SetLayoutCount, const VkDescriptorSetLayout* SetLayouts)
 {
 	VkPushConstantRange PushConstantRange = {};
@@ -713,14 +708,22 @@ struct SVertex
 
 struct SMesh
 {
-	std::vector<SVertex> Vertices;
-	std::vector<uint32_t> Indices;
+	uint32_t VertexOffset;
+	uint32_t VertexCount;
+
+	uint32_t IndexOffset;
+	uint32_t IndexCount;
 };
 
-SMesh LoadMesh(VmaAllocator MemoryAllocator, const char* Path)
+struct SGeometry
 {
-	SMesh Mesh = {};
+	std::vector<SVertex> Vertices;
+	std::vector<uint32_t> Indices;
+	std::vector<SMesh> Meshes;
+};
 
+void LoadMesh(SGeometry& Geometry, const char* Path)
+{
 	fastObjMesh* File = fast_obj_read(Path);
 	Assert(File);
 
@@ -765,19 +768,26 @@ SMesh LoadMesh(VmaAllocator MemoryAllocator, const char* Path)
 		}
 	}
 	Assert(VertexOffset == IndexCount);
+	fast_obj_destroy(File);
 
 	std::vector<uint32_t> Remap(IndexCount);
 	size_t UniqueVertices = meshopt_generateVertexRemap(Remap.data(), 0, IndexCount, Vertices.data(), IndexCount, sizeof(SVertex));
 
-	Mesh.Vertices.resize(UniqueVertices);
-	Mesh.Indices.resize(IndexCount);
+	size_t PrevVertexCount = Geometry.Vertices.size();
+	size_t PrevIndexCount = Geometry.Indices.size();
+	Geometry.Vertices.resize(PrevVertexCount + UniqueVertices);
+	Geometry.Indices.resize(PrevIndexCount + IndexCount);
 
-	meshopt_remapVertexBuffer(Mesh.Vertices.data(), Vertices.data(), IndexCount, sizeof(SVertex), Remap.data());
-	meshopt_remapIndexBuffer(Mesh.Indices.data(), 0, IndexCount, Remap.data());
+	meshopt_remapVertexBuffer(Geometry.Vertices.data() + PrevVertexCount, Vertices.data(), IndexCount, sizeof(SVertex), Remap.data());
+	meshopt_remapIndexBuffer(Geometry.Indices.data() + PrevIndexCount, 0, IndexCount, Remap.data());
 
-	fast_obj_destroy(File);
+	SMesh Mesh = {};
+	Mesh.VertexOffset = PrevVertexCount;
+	Mesh.VertexCount = UniqueVertices;
+	Mesh.IndexOffset = PrevIndexCount;
+	Mesh.IndexCount = IndexCount;
 
-	return Mesh;
+	Geometry.Meshes.push_back(Mesh);
 }
 
 VkPipeline CreateGraphicsPipeline(VkDevice Device, VkRenderPass RenderPass, VkPipelineLayout PipelineLayout, VkShaderModule VS, VkShaderModule FS)
@@ -939,42 +949,51 @@ int main()
 			VkPipelineLayout PipelineLayout = CreatePipelineLayout(Device, ArrayCount(DescriptorSetLayouts), DescriptorSetLayouts);
 			VkPipeline GraphicsPipeline = CreateGraphicsPipeline(Device, RenderPass, PipelineLayout, VS, FS);
 
-			SMesh KittenMesh = LoadMesh(MemoryAllocator, "meshes\\kitten.obj");
+			SGeometry Geometry = {};
+			LoadMesh(Geometry, "meshes\\kitten.obj");
+			LoadMesh(Geometry, "meshes\\bunny.obj");
 
 			const uint32_t ObjectsCount = 10000;
-			std::vector<SObject> Objects(ObjectsCount);
+			std::vector<SObjectTransform> Transforms(ObjectsCount);
+			std::vector<uint32_t> MeshIndices(ObjectsCount);
 
 			const float SceneRadius = 100.0f;
 			for (uint32_t I = 0; I < ObjectsCount; I++)
 			{
-				SObject& Object = Objects[I];
+				SObjectTransform& Transform = Transforms[I];
+			
+				MeshIndices[I] = rand() % Geometry.Meshes.size();
 
-				Object.Transform.Position.x = 2.0f * SceneRadius * (float(rand()) / RAND_MAX) - SceneRadius;
-				Object.Transform.Position.y = 2.0f * SceneRadius * (float(rand()) / RAND_MAX) - SceneRadius;
-				Object.Transform.Position.z = 2.0f * SceneRadius * (float(rand()) / RAND_MAX) - SceneRadius;
+				Transform.Position.x = 2.0f * SceneRadius * (float(rand()) / RAND_MAX) - SceneRadius;
+				Transform.Position.y = 2.0f * SceneRadius * (float(rand()) / RAND_MAX) - SceneRadius;
+				Transform.Position.z = 2.0f * SceneRadius * (float(rand()) / RAND_MAX) - SceneRadius;
 
-				Object.Transform.Scale = ((float(rand()) / RAND_MAX) + 1) * 2;
+				Transform.Scale = ((float(rand()) / RAND_MAX) + 1) * 2;
+				// Scaling for bunny.obj
+				if (MeshIndices[I] == 1)
+					Transform.Scale *= 0.25f;
 
 				float Angle = glm::radians(90.0f * (float(rand()) / RAND_MAX));
 				vec3 Axis = vec3((float(rand()) / RAND_MAX) * 2 - 1, (float(rand()) / RAND_MAX) * 2 - 1, (float(rand()) / RAND_MAX) * 2 - 1);
-				Object.Transform.Orientation = glm::rotate(quat(1, 0, 0, 0), Angle, Axis);
+				Transform.Orientation = glm::rotate(quat(1, 0, 0, 0), Angle, Axis);
 			}
 
 			std::vector<VkDrawIndexedIndirectCommand> IndirectDraws(ObjectsCount);
 			for (uint32_t I = 0; I < ObjectsCount; I++)
 			{
 				VkDrawIndexedIndirectCommand& Draw = IndirectDraws[I];
+				uint32_t MeshIndex = MeshIndices[I];
 
-				Draw.indexCount = KittenMesh.Indices.size();
+				Draw.indexCount = Geometry.Meshes[MeshIndex].IndexCount;
 				Draw.instanceCount = 1;
-				Draw.firstIndex = 0;
-				Draw.vertexOffset = 0;
+				Draw.firstIndex = Geometry.Meshes[MeshIndex].IndexOffset;
+				Draw.vertexOffset = Geometry.Meshes[MeshIndex].VertexOffset;
 				Draw.firstInstance = I;
 			}
 
-			UploadBuffer(Device, CommandPool, CommandBuffer, GraphicsQueue, VertexBuffer, StagingBuffer, KittenMesh.Vertices.data(), KittenMesh.Vertices.size() * sizeof(SVertex));
-			UploadBuffer(Device, CommandPool, CommandBuffer, GraphicsQueue, IndexBuffer, StagingBuffer, KittenMesh.Indices.data(), KittenMesh.Indices.size() * sizeof(uint32_t));
-			UploadBuffer(Device, CommandPool, CommandBuffer, GraphicsQueue, StorageBuffer, StagingBuffer, Objects.data(), Objects.size() * sizeof(SObject));
+			UploadBuffer(Device, CommandPool, CommandBuffer, GraphicsQueue, VertexBuffer, StagingBuffer, Geometry.Vertices.data(), Geometry.Vertices.size() * sizeof(SVertex));
+			UploadBuffer(Device, CommandPool, CommandBuffer, GraphicsQueue, IndexBuffer, StagingBuffer, Geometry.Indices.data(), Geometry.Indices.size() * sizeof(uint32_t));
+			UploadBuffer(Device, CommandPool, CommandBuffer, GraphicsQueue, StorageBuffer, StagingBuffer, Transforms.data(), Transforms.size() * sizeof(SObjectTransform));
 			UploadBuffer(Device, CommandPool, CommandBuffer, GraphicsQueue, IndirectBuffer, StagingBuffer, IndirectDraws.data(), IndirectDraws.size() * sizeof(VkDrawIndexedIndirectCommand));
 
 			double FrameCpuTimeAverage = 0.0f;
