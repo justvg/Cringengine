@@ -1,4 +1,4 @@
-#version 450
+#version 460
 
 layout (location = 0) in vec3 LocalPosition;
 layout (location = 1) in vec3 LocalNormal;
@@ -11,11 +11,16 @@ layout (set = 0, binding = 0) uniform CameraBuffer
 	mat4 Proj;
 };
 
-layout (push_constant) uniform PushConstants
+struct SObjectData
 {
 	vec3 Position;
 	float Scale;
 	vec4 Orientation;
+};
+
+layout (set = 1, binding = 0) readonly buffer ObjectsData
+{
+	SObjectData ObjectData[];
 };
 
 vec3 RotateQuaternion(vec3 V, vec4 Q)
@@ -26,5 +31,10 @@ vec3 RotateQuaternion(vec3 V, vec4 Q)
 void main()
 {
 	Color = LocalNormal;
-	gl_Position = Proj * View * vec4(RotateQuaternion(LocalPosition * Scale, Orientation) + Position, 1.0);
+
+	vec3 P = ObjectData[gl_BaseInstance].Position;
+	float S = ObjectData[gl_BaseInstance].Scale;
+	vec4 O = ObjectData[gl_BaseInstance].Orientation;
+
+	gl_Position = Proj * View * vec4(RotateQuaternion(LocalPosition * S, O) + P, 1.0);
 }

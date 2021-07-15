@@ -907,29 +907,34 @@ int main()
 
 			VkQueryPool QueryPool = CreateQueryPool(Device);
 
+			SBuffer StagingBuffer = CreateBuffer(MemoryAllocator, 64 * 1024 * 1024, VK_BUFFER_USAGE_TRANSFER_SRC_BIT, VMA_MEMORY_USAGE_CPU_ONLY);
+			SBuffer VertexBuffer = CreateBuffer(MemoryAllocator, 64 * 1024 * 1024, VK_BUFFER_USAGE_VERTEX_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT, VMA_MEMORY_USAGE_GPU_ONLY);
+			SBuffer IndexBuffer = CreateBuffer(MemoryAllocator, 64 * 1024 * 1024, VK_BUFFER_USAGE_INDEX_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT, VMA_MEMORY_USAGE_GPU_ONLY);
+			SBuffer StorageBuffer = CreateBuffer(MemoryAllocator, 64 * 1024 * 1024, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT, VMA_MEMORY_USAGE_GPU_ONLY);
+
 			VkShaderModule VS = LoadShader(Device, "shaders_bytecode\\default.vert.spv");
 			VkShaderModule FS = LoadShader(Device, "shaders_bytecode\\default.frag.spv");
 			
 			VkDescriptorPool DescriptorPool = CreateDescriptorPool(Device);
 
-			VkDescriptorSetLayoutBinding DescriptorSetLayoutBinding = CreateDescriptorSetLayoutBinding(0, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, VK_SHADER_STAGE_VERTEX_BIT);
-			VkDescriptorSetLayout DescriptorSetLayout = CreateDescriptorSetLayout(Device, 1, &DescriptorSetLayoutBinding);
+			VkDescriptorSetLayoutBinding CameraDescriptorSetLayoutBinding = CreateDescriptorSetLayoutBinding(0, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, VK_SHADER_STAGE_VERTEX_BIT);
+			VkDescriptorSetLayout CameraDescriptorSetLayout = CreateDescriptorSetLayout(Device, 1, &CameraDescriptorSetLayoutBinding);
 
-			VkDescriptorSet DescriptorSet = CreateDescriptorSet(Device, DescriptorPool, DescriptorSetLayout);
-			SBuffer DescriptorSetBindingBuffer = CreateBuffer(MemoryAllocator, 2*sizeof(mat4), VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT, VMA_MEMORY_USAGE_CPU_TO_GPU);
-			UpdateDescriptorSet(Device, DescriptorSet, 0, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, DescriptorSetBindingBuffer, 2*sizeof(mat4));
+			VkDescriptorSet CameraDescriptorSet = CreateDescriptorSet(Device, DescriptorPool, CameraDescriptorSetLayout);
+			SBuffer CameraDescriptorSetBindingBuffer = CreateBuffer(MemoryAllocator, 2*sizeof(mat4), VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT, VMA_MEMORY_USAGE_CPU_TO_GPU);
+			UpdateDescriptorSet(Device, CameraDescriptorSet, 0, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, CameraDescriptorSetBindingBuffer, 2*sizeof(mat4));
 
-			VkPipelineLayout PipelineLayout = CreatePipelineLayout(Device, 1, &DescriptorSetLayout);
+			VkDescriptorSetLayoutBinding ObjectsDescriptorSetLayoutBinding = CreateDescriptorSetLayoutBinding(0, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, VK_SHADER_STAGE_VERTEX_BIT);
+			VkDescriptorSetLayout ObjectsDescriptorSetLayout = CreateDescriptorSetLayout(Device, 1, &ObjectsDescriptorSetLayoutBinding);
+
+			VkDescriptorSet ObjectsDescriptorSet = CreateDescriptorSet(Device, DescriptorPool, ObjectsDescriptorSetLayout);
+			UpdateDescriptorSet(Device, ObjectsDescriptorSet, 0, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, StorageBuffer, StorageBuffer.Allocation->GetSize());
+
+			VkDescriptorSetLayout DescriptorSetLayouts[] = { CameraDescriptorSetLayout, ObjectsDescriptorSetLayout };
+			VkPipelineLayout PipelineLayout = CreatePipelineLayout(Device, ArrayCount(DescriptorSetLayouts), DescriptorSetLayouts);
 			VkPipeline GraphicsPipeline = CreateGraphicsPipeline(Device, RenderPass, PipelineLayout, VS, FS);
 
-			SBuffer StagingBuffer = CreateBuffer(MemoryAllocator, 64 * 1024 * 1024, VK_BUFFER_USAGE_TRANSFER_SRC_BIT, VMA_MEMORY_USAGE_CPU_ONLY);
-			SBuffer VertexBuffer = CreateBuffer(MemoryAllocator, 64 * 1024 * 1024, VK_BUFFER_USAGE_VERTEX_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT, VMA_MEMORY_USAGE_GPU_ONLY);
-			SBuffer IndexBuffer = CreateBuffer(MemoryAllocator, 64 * 1024 * 1024, VK_BUFFER_USAGE_INDEX_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT, VMA_MEMORY_USAGE_GPU_ONLY);
-
 			SMesh KittenMesh = LoadMesh(MemoryAllocator, "meshes\\kitten.obj");
-
-			UploadBuffer(Device, CommandPool, CommandBuffer, GraphicsQueue, VertexBuffer, StagingBuffer, KittenMesh.Vertices.data(), KittenMesh.Vertices.size() * sizeof(SVertex));
-			UploadBuffer(Device, CommandPool, CommandBuffer, GraphicsQueue, IndexBuffer, StagingBuffer, KittenMesh.Indices.data(), KittenMesh.Indices.size() * sizeof(uint32_t));
 
 			const uint32_t ObjectsCount = 10000;
 			std::vector<SObject> Objects(ObjectsCount);
@@ -950,6 +955,10 @@ int main()
 				Object.Transform.Orientation = glm::rotate(quat(1, 0, 0, 0), Angle, Axis);
 			}
 
+			UploadBuffer(Device, CommandPool, CommandBuffer, GraphicsQueue, VertexBuffer, StagingBuffer, KittenMesh.Vertices.data(), KittenMesh.Vertices.size() * sizeof(SVertex));
+			UploadBuffer(Device, CommandPool, CommandBuffer, GraphicsQueue, IndexBuffer, StagingBuffer, KittenMesh.Indices.data(), KittenMesh.Indices.size() * sizeof(uint32_t));
+			UploadBuffer(Device, CommandPool, CommandBuffer, GraphicsQueue, StorageBuffer, StagingBuffer, Objects.data(), Objects.size() * sizeof(SObject));
+
 			double FrameCpuTimeAverage = 0.0f;
 			double FrameGpuTimeAverage = 0.0f;
 			while (!glfwWindowShouldClose(Window))
@@ -963,7 +972,7 @@ int main()
 				SCameraBuffer CameraBufferData = {};
 				CameraBufferData.View = glm::lookAt(vec3(0.0f, 0.0f, 3.0f), vec3(0.0f), vec3(0.0f, 1.0f, 0.0f));
 				CameraBufferData.Proj = glm::perspective(70.0f, float(Swapchain.Width) / float(Swapchain.Height), 0.1f, FLT_MAX);
-				memcpy(DescriptorSetBindingBuffer.Data, &CameraBufferData, sizeof(CameraBufferData));
+				memcpy(CameraDescriptorSetBindingBuffer.Data, &CameraBufferData, sizeof(CameraBufferData));
 
 				uint32_t ImageIndex = 0;
 				VkCheck(vkAcquireNextImageKHR(Device, Swapchain.VkSwapchain, UINT64_MAX, AcquireSemaphore, VK_NULL_HANDLE, &ImageIndex));
@@ -999,7 +1008,8 @@ int main()
 
 				vkCmdBindPipeline(CommandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, GraphicsPipeline);
 
-				vkCmdBindDescriptorSets(CommandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, PipelineLayout, 0, 1, &DescriptorSet, 0, 0);
+				VkDescriptorSet DescriptorSets[] = { CameraDescriptorSet, ObjectsDescriptorSet };
+				vkCmdBindDescriptorSets(CommandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, PipelineLayout, 0, ArrayCount(DescriptorSets), DescriptorSets, 0, 0);
 
 				VkDeviceSize Offset = 0;
 				vkCmdBindVertexBuffers(CommandBuffer, 0, 1, &VertexBuffer.Buffer, &Offset);
@@ -1007,8 +1017,7 @@ int main()
 
 				for (uint32_t I = 0; I < ObjectsCount; I++)
 				{
-					vkCmdPushConstants(CommandBuffer, PipelineLayout, VK_SHADER_STAGE_VERTEX_BIT, 0, sizeof(SObjectTransform), &Objects[I].Transform);
-					vkCmdDrawIndexed(CommandBuffer, KittenMesh.Indices.size(), 1, 0, 0, 0);
+					vkCmdDrawIndexed(CommandBuffer, KittenMesh.Indices.size(), 1, 0, 0, I);
 				}
 
 				vkCmdEndRenderPass(CommandBuffer);
