@@ -147,11 +147,15 @@ VkDevice CreateDevice(VkPhysicalDevice PhysicalDevice, uint32_t FamilyIndex)
 		VK_KHR_SWAPCHAIN_EXTENSION_NAME
 	};
 
+	VkPhysicalDeviceFeatures DeviceFeatures = {};
+	DeviceFeatures.multiDrawIndirect = true;
+
 	VkDeviceCreateInfo CreateInfo = { VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO };
 	CreateInfo.queueCreateInfoCount = 1;
 	CreateInfo.pQueueCreateInfos = &QueueCreateInfo;
 	CreateInfo.enabledExtensionCount = ArrayCount(Extensions);
 	CreateInfo.ppEnabledExtensionNames = Extensions;
+	CreateInfo.pEnabledFeatures = &DeviceFeatures;
 
 	VkDevice Device = 0;
 	VkCheck(vkCreateDevice(PhysicalDevice, &CreateInfo, 0, &Device));
@@ -911,6 +915,7 @@ int main()
 			SBuffer VertexBuffer = CreateBuffer(MemoryAllocator, 64 * 1024 * 1024, VK_BUFFER_USAGE_VERTEX_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT, VMA_MEMORY_USAGE_GPU_ONLY);
 			SBuffer IndexBuffer = CreateBuffer(MemoryAllocator, 64 * 1024 * 1024, VK_BUFFER_USAGE_INDEX_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT, VMA_MEMORY_USAGE_GPU_ONLY);
 			SBuffer StorageBuffer = CreateBuffer(MemoryAllocator, 64 * 1024 * 1024, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT, VMA_MEMORY_USAGE_GPU_ONLY);
+			SBuffer IndirectBuffer = CreateBuffer(MemoryAllocator, 64 * 1024 * 1024, VK_BUFFER_USAGE_INDIRECT_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT, VMA_MEMORY_USAGE_GPU_ONLY);
 
 			VkShaderModule VS = LoadShader(Device, "shaders_bytecode\\default.vert.spv");
 			VkShaderModule FS = LoadShader(Device, "shaders_bytecode\\default.frag.spv");
@@ -955,9 +960,22 @@ int main()
 				Object.Transform.Orientation = glm::rotate(quat(1, 0, 0, 0), Angle, Axis);
 			}
 
+			std::vector<VkDrawIndexedIndirectCommand> IndirectDraws(ObjectsCount);
+			for (uint32_t I = 0; I < ObjectsCount; I++)
+			{
+				VkDrawIndexedIndirectCommand& Draw = IndirectDraws[I];
+
+				Draw.indexCount = KittenMesh.Indices.size();
+				Draw.instanceCount = 1;
+				Draw.firstIndex = 0;
+				Draw.vertexOffset = 0;
+				Draw.firstInstance = I;
+			}
+
 			UploadBuffer(Device, CommandPool, CommandBuffer, GraphicsQueue, VertexBuffer, StagingBuffer, KittenMesh.Vertices.data(), KittenMesh.Vertices.size() * sizeof(SVertex));
 			UploadBuffer(Device, CommandPool, CommandBuffer, GraphicsQueue, IndexBuffer, StagingBuffer, KittenMesh.Indices.data(), KittenMesh.Indices.size() * sizeof(uint32_t));
 			UploadBuffer(Device, CommandPool, CommandBuffer, GraphicsQueue, StorageBuffer, StagingBuffer, Objects.data(), Objects.size() * sizeof(SObject));
+			UploadBuffer(Device, CommandPool, CommandBuffer, GraphicsQueue, IndirectBuffer, StagingBuffer, IndirectDraws.data(), IndirectDraws.size() * sizeof(VkDrawIndexedIndirectCommand));
 
 			double FrameCpuTimeAverage = 0.0f;
 			double FrameGpuTimeAverage = 0.0f;
@@ -1014,11 +1032,8 @@ int main()
 				VkDeviceSize Offset = 0;
 				vkCmdBindVertexBuffers(CommandBuffer, 0, 1, &VertexBuffer.Buffer, &Offset);
 				vkCmdBindIndexBuffer(CommandBuffer, IndexBuffer.Buffer, 0, VK_INDEX_TYPE_UINT32);
-
-				for (uint32_t I = 0; I < ObjectsCount; I++)
-				{
-					vkCmdDrawIndexed(CommandBuffer, KittenMesh.Indices.size(), 1, 0, 0, I);
-				}
+				
+				vkCmdDrawIndexedIndirect(CommandBuffer, IndirectBuffer.Buffer, 0, ObjectsCount, sizeof(VkDrawIndexedIndirectCommand));
 
 				vkCmdEndRenderPass(CommandBuffer);
 
