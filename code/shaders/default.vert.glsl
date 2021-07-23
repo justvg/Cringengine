@@ -9,7 +9,11 @@ layout (set = 0, binding = 0) uniform CameraBuffer
 {
 	mat4 View;
 	mat4 Proj;
+
+	mat4 PrevView;
+	mat4 PrevProj;
 	
+	vec4 CameraPosition; // w = Near
 	vec4 Frustum[6];
 };
 

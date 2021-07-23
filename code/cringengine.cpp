@@ -311,15 +311,15 @@ SImage CreateImage(VkDevice Device, VmaAllocator MemoryAllocator, VkFormat Forma
 	return Image;
 }
 
-VkImageView CreateImageView(VkDevice Device, VkImage Image, VkFormat Format, uint32_t MipLevel, VkImageAspectFlags AspectFlags)
+VkImageView CreateImageView(VkDevice Device, VkImage Image, VkFormat Format, uint32_t MipLevel, uint32_t MipCount, VkImageAspectFlags AspectFlags)
 {
 	VkImageViewCreateInfo CreateInfo = { VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO };
 	CreateInfo.image = Image;
 	CreateInfo.viewType = VK_IMAGE_VIEW_TYPE_2D;
 	CreateInfo.format = Format;
 	CreateInfo.subresourceRange.aspectMask = AspectFlags;
-	CreateInfo.subresourceRange.levelCount = 1;
 	CreateInfo.subresourceRange.baseMipLevel = MipLevel;
+	CreateInfo.subresourceRange.levelCount = MipCount;
 	CreateInfo.subresourceRange.layerCount = 1;
 
 	VkImageView ImageView = 0;
@@ -329,17 +329,24 @@ VkImageView CreateImageView(VkDevice Device, VkImage Image, VkFormat Format, uin
 	return ImageView;
 }
 
-VkSampler CreateSampler(VkDevice Device)
+VkSampler CreateSampler(VkDevice Device, VkSamplerReductionMode ReductionMode = VK_SAMPLER_REDUCTION_MODE_WEIGHTED_AVERAGE)
 {
 	VkSamplerCreateInfo CreateInfo = { VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO };
-	CreateInfo.magFilter = VK_FILTER_NEAREST;
-	CreateInfo.minFilter = VK_FILTER_NEAREST;
+	CreateInfo.magFilter = VK_FILTER_LINEAR;
+	CreateInfo.minFilter = VK_FILTER_LINEAR;
 	CreateInfo.mipmapMode = VK_SAMPLER_MIPMAP_MODE_NEAREST;
 	CreateInfo.addressModeU = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
 	CreateInfo.addressModeV = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
 	CreateInfo.addressModeW = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
 	CreateInfo.minLod = 0;
 	CreateInfo.maxLod = 16.0f;
+
+	VkSamplerReductionModeCreateInfo ReductionCreateInfo = { VK_STRUCTURE_TYPE_SAMPLER_REDUCTION_MODE_CREATE_INFO };
+	if (ReductionMode != VK_SAMPLER_REDUCTION_MODE_WEIGHTED_AVERAGE)
+	{
+		ReductionCreateInfo.reductionMode = ReductionMode;
+		CreateInfo.pNext = &ReductionCreateInfo;
+	}
 
 	VkSampler Sampler = 0;
 	VkCheck(vkCreateSampler(Device, &CreateInfo, 0, &Sampler));
@@ -367,6 +374,7 @@ struct SSwapchain
 	VkImageView DepthImageView;
 
 	SImage DepthMipsImage;
+	VkImageView DepthMipView;
 	std::vector<VkImageView> DepthMipViews;
 
 	uint32_t Width, Height;
@@ -417,19 +425,21 @@ SSwapchain CreateSwapchain(VkDevice Device, VkPhysicalDevice PhysicalDevice, VkS
 	std::vector<VkImageView> ImageViews(ImageCount);
 	for (uint32_t I = 0; I < ImageCount; I++)
 	{
-		ImageViews[I] = CreateImageView(Device, Images[I], ColorFormat, 0, VK_IMAGE_ASPECT_COLOR_BIT);
+		ImageViews[I] = CreateImageView(Device, Images[I], ColorFormat, 0, 1, VK_IMAGE_ASPECT_COLOR_BIT);
 	}
 
 	SImage DepthImage = CreateImage(Device, MemoryAllocator, DepthFormat, SurfaceCaps.currentExtent.width, SurfaceCaps.currentExtent.height, 1, VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT);
-	VkImageView DepthImageView = CreateImageView(Device, DepthImage.Image, DepthFormat, 0, VK_IMAGE_ASPECT_DEPTH_BIT);
+	VkImageView DepthImageView = CreateImageView(Device, DepthImage.Image, DepthFormat, 0, 1, VK_IMAGE_ASPECT_DEPTH_BIT);
 
 	uint32_t DepthMipsCount = GetMipsCount(SurfaceCaps.currentExtent.width, SurfaceCaps.currentExtent.height) - 1;
 	SImage DepthMipsImage = CreateImage(Device, MemoryAllocator, VK_FORMAT_R32_SFLOAT, SurfaceCaps.currentExtent.width >> 1, SurfaceCaps.currentExtent.height >> 1, DepthMipsCount, VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_SAMPLED_BIT);
 	
+	VkImageView DepthMipView = CreateImageView(Device, DepthMipsImage.Image, VK_FORMAT_R32_SFLOAT, 0, VK_REMAINING_MIP_LEVELS, VK_IMAGE_ASPECT_COLOR_BIT);
+
 	std::vector<VkImageView> DepthMipViews(DepthMipsCount);
 	for (uint32_t I = 0; I < DepthMipViews.size(); I++)
 	{
-		DepthMipViews[I] = CreateImageView(Device, DepthMipsImage.Image, VK_FORMAT_R32_SFLOAT, I, VK_IMAGE_ASPECT_COLOR_BIT);
+		DepthMipViews[I] = CreateImageView(Device, DepthMipsImage.Image, VK_FORMAT_R32_SFLOAT, I, 1, VK_IMAGE_ASPECT_COLOR_BIT);
 	}
 
 	std::vector<VkFramebuffer> Framebuffers(ImageCount);
@@ -454,6 +464,7 @@ SSwapchain CreateSwapchain(VkDevice Device, VkPhysicalDevice PhysicalDevice, VkS
 	Swapchain.DepthImage = DepthImage;
 	Swapchain.DepthImageView = DepthImageView;
 	Swapchain.DepthMipsImage = DepthMipsImage;
+	Swapchain.DepthMipView = DepthMipView;
 	Swapchain.DepthMipViews = DepthMipViews;
 	Swapchain.Width = SurfaceCaps.currentExtent.width;
 	Swapchain.Height = SurfaceCaps.currentExtent.height;
@@ -473,6 +484,7 @@ void DestroySwapchain(SSwapchain Swapchain, VkDevice Device, VmaAllocator Memory
 	vkDestroyImageView(Device, Swapchain.DepthImageView, 0);
 	vmaDestroyImage(MemoryAllocator, Swapchain.DepthImage.Image, Swapchain.DepthImage.Allocation);
 
+	vkDestroyImageView(Device, Swapchain.DepthMipView, 0);
 	for (uint32_t I = 0; I < Swapchain.DepthMipViews.size(); I++)
 	{
 		vkDestroyImageView(Device, Swapchain.DepthMipViews[I], 0);
@@ -552,7 +564,7 @@ VkQueryPool CreateQueryPool(VkDevice Device)
 {
 	VkQueryPoolCreateInfo CreateInfo = { VK_STRUCTURE_TYPE_QUERY_POOL_CREATE_INFO };
 	CreateInfo.queryType = VK_QUERY_TYPE_TIMESTAMP;
-	CreateInfo.queryCount = 2;
+	CreateInfo.queryCount = 4;
 
 	VkQueryPool QueryPool = 0;
 	VkCheck(vkCreateQueryPool(Device, &CreateInfo, 0, &QueryPool));
@@ -574,7 +586,7 @@ VkImageMemoryBarrier CreateImageMemoryBarrier(VkAccessFlags SrcAccessMask, VkAcc
 	Barrier.subresourceRange.aspectMask = AspectMask;
 	Barrier.subresourceRange.layerCount = VK_REMAINING_ARRAY_LAYERS;
 	Barrier.subresourceRange.baseMipLevel = MipLevel;
-	Barrier.subresourceRange.levelCount = VK_REMAINING_MIP_LEVELS;
+	Barrier.subresourceRange.levelCount = MipLevelCount;
 
 	return Barrier;
 }
@@ -776,6 +788,9 @@ struct SCameraBuffer
 	mat4 View;
 	mat4 Proj;
 
+	mat4 PrevView;
+	mat4 PrevProj;
+
 	vec4 CameraPosition;
 	vec4 Frustums[6];
 };
@@ -784,6 +799,10 @@ struct SPushConstantsCompute
 {
 	uint32_t bLodEnabled;
 	uint32_t LodsCount;
+
+	uint32_t bOcclusionCullingEnabled;
+	uint32_t ImageWidth;
+	uint32_t ImageHeight;
 };
 
 VkPipelineLayout CreatePipelineLayout(VkDevice Device, uint32_t SetLayoutCount, const VkDescriptorSetLayout* SetLayouts, uint32_t PushConstantsSize = 0)
@@ -1075,7 +1094,7 @@ VkPipeline CreateComputePipeline(VkDevice Device, VkPipelineLayout PipelineLayou
 
 static bool bGlobalCullingEnabled = true;
 static bool bGlobalLodsEnabled = true;
-
+static bool bGlobalOcclusionCullingEnabled = true;
 void GLFWKeyCallback(GLFWwindow* Window, int Key, int Scancode, int Action, int Mods)
 {
 	if (Key == GLFW_KEY_C)
@@ -1100,6 +1119,36 @@ void GLFWKeyCallback(GLFWwindow* Window, int Key, int Scancode, int Action, int 
 			bGlobalLodsEnabled = true;
 		}
 	}
+	else if (Key == GLFW_KEY_O)
+	{
+		if (Action == GLFW_PRESS)
+		{
+			bGlobalOcclusionCullingEnabled = false;
+		}
+		else if (Action == GLFW_RELEASE)
+		{
+			bGlobalOcclusionCullingEnabled = true;
+		}
+	}
+}
+
+static float GlobalCameraPitch = 0.0f;
+static float GlobalCameraHead = 0.0f;
+void GLFWCursorPositionCallback(GLFWwindow* Window, double XPos, double YPos)
+{
+	static double LastX = XPos;
+	static double LastY = YPos;
+	
+	float MouseDeltaX = (float)(XPos - LastX);
+	float MouseDeltaY = (float)(YPos - LastY);
+
+	GlobalCameraPitch += -0.1f * MouseDeltaY;
+	GlobalCameraHead += -0.1f * MouseDeltaX;
+	GlobalCameraPitch = (GlobalCameraPitch > 89.0f) ? 89.0f : GlobalCameraPitch;
+	GlobalCameraPitch = (GlobalCameraPitch < -89.0f) ? -89.0f : GlobalCameraPitch;
+
+	LastX = XPos;
+	LastY = YPos;
 }
 
 int main()
@@ -1110,7 +1159,10 @@ int main()
 		GLFWwindow* Window = glfwCreateWindow(1024, 720, "Cringengine", 0, 0);
 		if (Window)
 		{
+			glfwSetInputMode(Window, GLFW_CURSOR, GLFW_CURSOR_DISABLED);
+
 			glfwSetKeyCallback(Window, GLFWKeyCallback);
+			glfwSetCursorPosCallback(Window, GLFWCursorPositionCallback);
 
 			VkInstance Instance = CreateInstance();
 			VkPhysicalDevice PhysicalDevice = PickPhysicalDevice(Instance);
@@ -1158,7 +1210,9 @@ int main()
 			VkShaderModule DownscaleCS = LoadShader(Device, "shaders_bytecode\\downscale.comp.spv");
 			VkShaderModule VS = LoadShader(Device, "shaders_bytecode\\default.vert.spv");
 			VkShaderModule FS = LoadShader(Device, "shaders_bytecode\\default.frag.spv");
-			
+
+			VkSampler Sampler = CreateSampler(Device, VK_SAMPLER_REDUCTION_MODE_MAX);
+
 			VkDescriptorPool DescriptorPool = CreateDescriptorPool(Device);
 
 			// Create graphics pipeline and its descriptors
@@ -1192,7 +1246,13 @@ int main()
 			UpdateDescriptorSetBuffer(Device, CullDescriptorSet, 1, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, IndirectBuffer, IndirectBuffer.Allocation->GetSize());
 			UpdateDescriptorSetBuffer(Device, CullDescriptorSet, 2, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, CountBuffer, CountBuffer.Allocation->GetSize());
 
-			VkDescriptorSetLayout ComputeDescriptorSetLayouts[] = { CameraDescriptorSetLayout, ComputeDescriptorSetLayout };
+			VkDescriptorSetLayoutBinding HiZDescriptorSetLayoutBinding = CreateDescriptorSetLayoutBinding(0, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, VK_SHADER_STAGE_COMPUTE_BIT);;
+			VkDescriptorSetLayout HiDepthDescriptorSetLayout = CreateDescriptorSetLayout(Device, 1, &HiZDescriptorSetLayoutBinding);
+
+			VkDescriptorSet HiZDescriptorSet = CreateDescriptorSet(Device, DescriptorPool, HiDepthDescriptorSetLayout);
+			UpdateDescriptorSetImage(Device, HiZDescriptorSet, 0, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, Sampler, Swapchain.DepthMipView, VK_IMAGE_LAYOUT_GENERAL);
+
+			VkDescriptorSetLayout ComputeDescriptorSetLayouts[] = { CameraDescriptorSetLayout, ComputeDescriptorSetLayout, HiDepthDescriptorSetLayout };
 			VkPipelineLayout ComputePipelineLayout = CreatePipelineLayout(Device, ArrayCount(ComputeDescriptorSetLayouts), ComputeDescriptorSetLayouts, sizeof(SPushConstantsCompute));
 			VkPipeline ComputePipeline = CreateComputePipeline(Device, ComputePipelineLayout, CS);
 
@@ -1203,7 +1263,6 @@ int main()
 			VkDescriptorSetLayoutBinding DownscaleDescriptorSetLayoutBindings[] = { DownscaleOutDescriptorSetLayoutBinging, DownscaleInDescriptorSetLayoutBinging };
 			VkDescriptorSetLayout DownscaleDescriptorSetLayout = CreateDescriptorSetLayout(Device, ArrayCount(DownscaleDescriptorSetLayoutBindings), DownscaleDescriptorSetLayoutBindings);
 
-			VkSampler Sampler = CreateSampler(Device);
 			VkDescriptorSet DownscaleDescriptorSets[16] = {};
 			for (uint32_t I = 0; I < Swapchain.DepthMipViews.size(); I++)
 			{
@@ -1273,6 +1332,11 @@ int main()
 			VkCheck(vkCreateEvent(Device, &CreateInfo, 0, &Event));
 			Assert(Event);
 
+			SCameraBuffer CameraBufferData = {};
+			vec3 CameraPosition = vec3(0.0f, 0.0f, 3.0f);
+			vec3 CameraDir = vec3(0.0f);
+
+			uint32_t FrameID = 0;
 			double FrameCpuTimeAverage = 0.0f;
 			double FrameGpuTimeAverage = 0.0f;
 			while (!glfwWindowShouldClose(Window))
@@ -1281,8 +1345,11 @@ int main()
 
 				glfwPollEvents();
 
-				if (ResizeSwapchainIfChanged(Swapchain, Device, PhysicalDevice, Surface, SwapchainFormat, DepthFormat, RenderPass, MemoryAllocator))
+				bool bSwapchainWasResized = ResizeSwapchainIfChanged(Swapchain, Device, PhysicalDevice, Surface, SwapchainFormat, DepthFormat, RenderPass, MemoryAllocator);
+				if (bSwapchainWasResized)
 				{
+					UpdateDescriptorSetImage(Device, HiZDescriptorSet, 0, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, Sampler, Swapchain.DepthMipView, VK_IMAGE_LAYOUT_GENERAL);
+
 					for (uint32_t I = 0; I < Swapchain.DepthMipViews.size(); I++)
 					{
 						if (I == 0)
@@ -1298,8 +1365,11 @@ int main()
 					}
 				}
 
-				vec3 CameraPosition = vec3(0.0f, 0.0f, 3.0f);
-				vec3 CameraDir = glm::normalize(vec3(0.0f) - CameraPosition);
+				CameraDir.x = -cosf(glm::radians(GlobalCameraPitch)) * sinf(glm::radians(GlobalCameraHead));
+				CameraDir.y = sinf(glm::radians(GlobalCameraPitch));
+				CameraDir.z = -cosf(glm::radians(GlobalCameraPitch)) * cosf(glm::radians(GlobalCameraHead));
+				CameraDir = normalize(CameraDir);
+
 				vec3 CameraRight = glm::normalize(glm::cross(CameraDir, vec3(0.0f, 1.0f, 0.0f)));
 				vec3 CameraUp = glm::cross(CameraRight, CameraDir);
 				float CameraNear = 0.1f;
@@ -1311,11 +1381,18 @@ int main()
 				float FarHalfHeight = CameraFar * tanf(0.5f*glm::radians(FoV));
 				float FarHalfWidth = AspectRatio * FarHalfHeight;
 
-				SCameraBuffer CameraBufferData = {};
+				CameraBufferData.PrevView = CameraBufferData.View;
+				CameraBufferData.PrevProj = CameraBufferData.Proj;
 				CameraBufferData.View = glm::lookAt(CameraPosition, CameraPosition + CameraDir, CameraUp);
 				CameraBufferData.Proj = glm::perspective(FoV, AspectRatio, CameraNear, CameraFar);
-				CameraBufferData.CameraPosition = vec4(CameraPosition, 0.0f);
+				CameraBufferData.CameraPosition = vec4(CameraPosition, -CameraNear);
+				if (FrameID == 0)
+				{
+					CameraBufferData.PrevView = CameraBufferData.View;
+					CameraBufferData.PrevProj = CameraBufferData.Proj;
+				}
 
+				memset(CameraBufferData.Frustums, 0, sizeof(CameraBufferData.Frustums));
 				if (bGlobalCullingEnabled)
 				{
 					vec3 FrustumPoints[8] = {};
@@ -1355,7 +1432,7 @@ int main()
 				CommandBufferBeginInfo.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
 				VkCheck(vkBeginCommandBuffer(CommandBuffer, &CommandBufferBeginInfo));
 
-				vkCmdResetQueryPool(CommandBuffer, QueryPool, 0, 2);
+				vkCmdResetQueryPool(CommandBuffer, QueryPool, 0, 4);
 				vkCmdWriteTimestamp(CommandBuffer, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, QueryPool, 0);
 
 				vkCmdFillBuffer(CommandBuffer, CountBuffer.Buffer, 0, sizeof(uint32_t), 0);
@@ -1363,18 +1440,31 @@ int main()
 				VkBufferMemoryBarrier FillBufferBarrier = CreateBufferMemoryBarrier(VK_ACCESS_TRANSFER_WRITE_BIT, VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT, CountBuffer, sizeof(uint32_t));
 				vkCmdPipelineBarrier(CommandBuffer, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0, 0, 0, 1, &FillBufferBarrier, 0, 0);
 
+				if ((FrameID == 0) || (bSwapchainWasResized))
+				{
+					VkImageMemoryBarrier HiZBarrier = CreateImageMemoryBarrier(VK_ACCESS_SHADER_READ_BIT, VK_ACCESS_SHADER_READ_BIT, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_GENERAL, Swapchain.DepthMipsImage.Image, VK_IMAGE_ASPECT_COLOR_BIT);
+					vkCmdPipelineBarrier(CommandBuffer, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0, 0, 0, 0, 0, 1, &HiZBarrier);
+				}
+				else
+				{
+					VkImageMemoryBarrier HiZBarrier = CreateImageMemoryBarrier(VK_ACCESS_SHADER_READ_BIT, VK_ACCESS_SHADER_READ_BIT, VK_IMAGE_LAYOUT_GENERAL, VK_IMAGE_LAYOUT_GENERAL, Swapchain.DepthMipsImage.Image, VK_IMAGE_ASPECT_COLOR_BIT);
+					vkCmdPipelineBarrier(CommandBuffer, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0, 0, 0, 0, 0, 1, &HiZBarrier);
+				}
+
 				vkCmdBindPipeline(CommandBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, ComputePipeline);
 
-				VkDescriptorSet ComputeDescriptorSets[] = { CameraDescriptorSet, CullDescriptorSet };
+				VkDescriptorSet ComputeDescriptorSets[] = { CameraDescriptorSet, CullDescriptorSet, HiZDescriptorSet };
 				vkCmdBindDescriptorSets(CommandBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, ComputePipelineLayout, 0, ArrayCount(ComputeDescriptorSets), ComputeDescriptorSets, 0, 0);
 
-				SPushConstantsCompute PushConstants = { bGlobalLodsEnabled, LodsCount };
+				SPushConstantsCompute PushConstants = { bGlobalLodsEnabled, LodsCount, bGlobalOcclusionCullingEnabled, Swapchain.Width, Swapchain.Height };
 				vkCmdPushConstants(CommandBuffer, ComputePipelineLayout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(SPushConstantsCompute), &PushConstants);
 
 				vkCmdDispatch(CommandBuffer, (ObjectsCount + 31) / 32, 1, 1);
 
 				VkBufferMemoryBarrier CullBufferBarrier = CreateBufferMemoryBarrier(VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT, VK_ACCESS_INDIRECT_COMMAND_READ_BIT, CountBuffer, sizeof(uint32_t));
 				vkCmdPipelineBarrier(CommandBuffer, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_DRAW_INDIRECT_BIT, 0, 0, 0, 1, &CullBufferBarrier, 0, 0);
+
+				vkCmdWriteTimestamp(CommandBuffer, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, QueryPool, 1);
 
 				VkViewport Viewport = { 0.0f, float(Swapchain.Height), float(Swapchain.Width), -float(Swapchain.Height), 0.0f, 1.0f };
 				VkRect2D Scissor = { {0, 0}, {Swapchain.Width, Swapchain.Height} };
@@ -1415,7 +1505,7 @@ int main()
 				VkImageMemoryBarrier RenderEndBarrier = CreateImageMemoryBarrier(VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT, 0, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, VK_IMAGE_LAYOUT_PRESENT_SRC_KHR, Swapchain.Images[ImageIndex], VK_IMAGE_ASPECT_COLOR_BIT);
 				vkCmdPipelineBarrier(CommandBuffer, VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_DEPENDENCY_BY_REGION_BIT, 0, 0, 0, 0, 1, &RenderEndBarrier);
 
-				vkCmdBindPipeline(CommandBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, DownscalePipeline);
+				vkCmdWriteTimestamp(CommandBuffer, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, QueryPool, 2);
 
 				VkImageMemoryBarrier DownscaleDepthBarriers[] =
 				{
@@ -1423,6 +1513,8 @@ int main()
 					CreateImageMemoryBarrier(0, VK_ACCESS_SHADER_WRITE_BIT, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_GENERAL, Swapchain.DepthMipsImage.Image, VK_IMAGE_ASPECT_COLOR_BIT),
 				};
 				vkCmdPipelineBarrier(CommandBuffer, VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_DEPENDENCY_BY_REGION_BIT, 0, 0, 0, 0, ArrayCount(DownscaleDepthBarriers), DownscaleDepthBarriers);
+
+				vkCmdBindPipeline(CommandBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, DownscalePipeline);
 
 				for (uint32_t I = 0; I < Swapchain.DepthMipViews.size(); I++)
 				{
@@ -1437,7 +1529,7 @@ int main()
 					vkCmdPipelineBarrier(CommandBuffer, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_DEPENDENCY_BY_REGION_BIT, 0, 0, 0, 0, 1, &MipDownscaleDepthBarrier);
 				}
 
-				vkCmdWriteTimestamp(CommandBuffer, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, QueryPool, 1);
+				vkCmdWriteTimestamp(CommandBuffer, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, QueryPool, 3);
 
 				VkCheck(vkEndCommandBuffer(CommandBuffer));
 
@@ -1462,11 +1554,17 @@ int main()
 
 				VkCheck(vkDeviceWaitIdle(Device));
 
-				uint64_t Timestamps[2] = {};
+				uint64_t Timestamps[4] = {};
 				VkCheck(vkGetQueryPoolResults(Device, QueryPool, 0, ArrayCount(Timestamps), sizeof(Timestamps), Timestamps, sizeof(Timestamps[0]), VK_QUERY_RESULT_64_BIT));
 
 				double FrameGpuBeginTime = double(Timestamps[0]) * PhysicalDeviceProps.limits.timestampPeriod * 1e-6;
-				double FrameGpuEndTime = double(Timestamps[1]) * PhysicalDeviceProps.limits.timestampPeriod * 1e-6;
+				double FrameGpuCullingEndTime = double(Timestamps[1]) * PhysicalDeviceProps.limits.timestampPeriod * 1e-6;
+				double FrameGpuRenderEndTime = double(Timestamps[2]) * PhysicalDeviceProps.limits.timestampPeriod * 1e-6;
+				double FrameGpuEndTime = double(Timestamps[3]) * PhysicalDeviceProps.limits.timestampPeriod * 1e-6;
+
+				double FrameGpuCullingTime = FrameGpuCullingEndTime - FrameGpuBeginTime;
+				double FrameGpuRenderTime = FrameGpuRenderEndTime - FrameGpuCullingEndTime;
+				double FrameGpuHiZTime = FrameGpuEndTime - FrameGpuRenderEndTime;
 				double FrameGpuTime = FrameGpuEndTime - FrameGpuBeginTime;
 
 				double FrameCpuEndTime = glfwGetTime();
@@ -1475,12 +1573,16 @@ int main()
 				FrameCpuTimeAverage = 0.95*FrameCpuTimeAverage + 0.05*FrameCpuTime;
 				FrameGpuTimeAverage = 0.95*FrameGpuTimeAverage + 0.05*FrameGpuTime;
 
-				char Title[256];
-				sprintf(Title, "cpu: %.2f ms; gpu: %.2f ms; culling: %s; lods: %s;", FrameCpuTimeAverage, FrameGpuTimeAverage, 
-																					 bGlobalCullingEnabled ? "ON" : "OFF",
-																					 bGlobalLodsEnabled ? "ON" : "OFF");
+				char Title[512];
+				sprintf(Title, "cpu: %.2f ms; gpu: %.2f ms; culling: %s; lods: %s; occlusion culling: %s; culling gpu: %.2f ms; render gpu: %.2f ms; hi-z gpu: %0.2f ms", FrameCpuTimeAverage, FrameGpuTimeAverage, 
+																																										  bGlobalCullingEnabled ? "ON" : "OFF",
+																																										  bGlobalLodsEnabled ? "ON" : "OFF",
+																																										  bGlobalOcclusionCullingEnabled ? "ON" : "OFF",
+																																										  FrameGpuCullingTime, FrameGpuRenderTime, FrameGpuHiZTime);
 
 				glfwSetWindowTitle(Window, Title);
+
+				FrameID++;
 			}
 		}
 		else

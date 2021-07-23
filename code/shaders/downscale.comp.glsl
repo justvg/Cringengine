@@ -14,8 +14,8 @@ void main()
 	uvec2 TexCoordinate = gl_GlobalInvocationID.xy;
 	vec2 UV = (vec2(TexCoordinate) + vec2(0.5)) / ImageSize;
 	
-	vec4 Depth4 = textureGather(InImage, UV);
-	float Depth = max(max(Depth4.x, Depth4.y), max(Depth4.z, Depth4.w));
+	// This computes max depth of 2x2 texel quad
+	float Depth = texture(InImage, UV).x;
 	
 	imageStore(OutImage, ivec2(TexCoordinate), vec4(Depth));
 }
