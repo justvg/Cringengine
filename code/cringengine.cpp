@@ -38,7 +38,7 @@ VkInstance CreateInstance()
 	AppInfo.applicationVersion = VK_MAKE_VERSION(1, 0, 0);
 	AppInfo.pEngineName = "Cringengine";
 	AppInfo.engineVersion = VK_MAKE_VERSION(1, 0, 0);
-	AppInfo.apiVersion = VK_API_VERSION_1_1;
+	AppInfo.apiVersion = VK_API_VERSION_1_2;
 
 	uint32_t GLFWExtensionCount;
 	const char** GLFWExtensions = glfwGetRequiredInstanceExtensions(&GLFWExtensionCount);
@@ -150,7 +150,11 @@ VkDevice CreateDevice(VkPhysicalDevice PhysicalDevice, uint32_t FamilyIndex)
 	VkPhysicalDeviceFeatures DeviceFeatures = {};
 	DeviceFeatures.multiDrawIndirect = true;
 
+	VkPhysicalDeviceVulkan12Features DeviceFeatures12 = { VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_FEATURES };
+	DeviceFeatures12.drawIndirectCount = true;
+
 	VkDeviceCreateInfo CreateInfo = { VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO };
+	CreateInfo.pNext = &DeviceFeatures12;
 	CreateInfo.queueCreateInfoCount = 1;
 	CreateInfo.pQueueCreateInfos = &QueueCreateInfo;
 	CreateInfo.enabledExtensionCount = ArrayCount(Extensions);
@@ -511,6 +515,27 @@ VkImageMemoryBarrier CreateImageMemoryBarrier(VkAccessFlags SrcAccessMask, VkAcc
 	return Barrier;
 }
 
+struct SBuffer
+{
+	VkBuffer Buffer;
+	VmaAllocation Allocation;
+	void* Data;
+};
+
+VkBufferMemoryBarrier CreateBufferMemoryBarrier(VkAccessFlags SrcAccessMask, VkAccessFlags DstAccessMask, SBuffer Buffer, uint64_t Size)
+{
+	VkBufferMemoryBarrier Barrier = { VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER };
+	Barrier.srcAccessMask = SrcAccessMask;
+	Barrier.dstAccessMask = DstAccessMask;
+	Barrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+	Barrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+	Barrier.buffer = Buffer.Buffer;
+	Barrier.offset = 0;
+	Barrier.size = Size;
+
+	return Barrier;
+}
+
 VkShaderModule LoadShader(VkDevice Device, const char* Path)
 {
 	FILE* File = fopen(Path, "rb");
@@ -538,13 +563,6 @@ VkShaderModule LoadShader(VkDevice Device, const char* Path)
 
 	return ShaderModule;
 }
-
-struct SBuffer
-{
-	VkBuffer Buffer;
-	VmaAllocation Allocation;
-	void* Data;
-};
 
 SBuffer CreateBuffer(VmaAllocator MemoryAllocator, VkDeviceSize Size, VkBufferUsageFlags BufferUsage, VmaMemoryUsage MemoryUsage)
 {
@@ -987,6 +1005,7 @@ int main()
 			SBuffer IndexBuffer = CreateBuffer(MemoryAllocator, 64 * 1024 * 1024, VK_BUFFER_USAGE_INDEX_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT, VMA_MEMORY_USAGE_GPU_ONLY);
 			SBuffer MeshDrawBuffer = CreateBuffer(MemoryAllocator, 64 * 1024 * 1024, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT, VMA_MEMORY_USAGE_GPU_ONLY);
 			SBuffer IndirectBuffer = CreateBuffer(MemoryAllocator, 64 * 1024 * 1024, VK_BUFFER_USAGE_INDIRECT_BUFFER_BIT | VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, VMA_MEMORY_USAGE_GPU_ONLY);
+			SBuffer CountBuffer = CreateBuffer(MemoryAllocator, sizeof(uint32_t), VK_BUFFER_USAGE_INDIRECT_BUFFER_BIT | VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT, VMA_MEMORY_USAGE_GPU_ONLY);
 
 			VkShaderModule CS = LoadShader(Device, "shaders_bytecode\\cull.comp.spv");
 			VkShaderModule VS = LoadShader(Device, "shaders_bytecode\\default.vert.spv");
@@ -1015,13 +1034,15 @@ int main()
 			// Create compute pipeline and its descriptors
 			VkDescriptorSetLayoutBinding CullDescriptorSetLayoutBinding = CreateDescriptorSetLayoutBinding(0, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, VK_SHADER_STAGE_COMPUTE_BIT);;
 			VkDescriptorSetLayoutBinding CmdDescriptorSetLayoutBinding = CreateDescriptorSetLayoutBinding(1, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, VK_SHADER_STAGE_COMPUTE_BIT);;
+			VkDescriptorSetLayoutBinding CountDescriptorSetLayoutBinding = CreateDescriptorSetLayoutBinding(2, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, VK_SHADER_STAGE_COMPUTE_BIT);;
 
-			VkDescriptorSetLayoutBinding ComputeDescriptorSetLayoutBindings[] = { CullDescriptorSetLayoutBinding, CmdDescriptorSetLayoutBinding };
+			VkDescriptorSetLayoutBinding ComputeDescriptorSetLayoutBindings[] = { CullDescriptorSetLayoutBinding, CmdDescriptorSetLayoutBinding, CountDescriptorSetLayoutBinding };
 			VkDescriptorSetLayout ComputeDescriptorSetLayout = CreateDescriptorSetLayout(Device, ArrayCount(ComputeDescriptorSetLayoutBindings), ComputeDescriptorSetLayoutBindings);
 
 			VkDescriptorSet CullDescriptorSet = CreateDescriptorSet(Device, DescriptorPool, ComputeDescriptorSetLayout);
 			UpdateDescriptorSet(Device, CullDescriptorSet, 0, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, MeshDrawBuffer, MeshDrawBuffer.Allocation->GetSize());
 			UpdateDescriptorSet(Device, CullDescriptorSet, 1, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, IndirectBuffer, IndirectBuffer.Allocation->GetSize());
+			UpdateDescriptorSet(Device, CullDescriptorSet, 2, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, CountBuffer, CountBuffer.Allocation->GetSize());
 
 			VkDescriptorSetLayout ComputeDescriptorSetLayouts[] = { CameraDescriptorSetLayout, ComputeDescriptorSetLayout };
 			VkPipelineLayout ComputePipelineLayout = CreatePipelineLayout(Device, ArrayCount(ComputeDescriptorSetLayouts), ComputeDescriptorSetLayouts);
@@ -1137,12 +1158,20 @@ int main()
 				vkCmdResetQueryPool(CommandBuffer, QueryPool, 0, 2);
 				vkCmdWriteTimestamp(CommandBuffer, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, QueryPool, 0);
 
+				vkCmdFillBuffer(CommandBuffer, CountBuffer.Buffer, 0, sizeof(uint32_t), 0);
+
+				VkBufferMemoryBarrier FillBufferBarrier = CreateBufferMemoryBarrier(VK_ACCESS_TRANSFER_WRITE_BIT, VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT, CountBuffer, sizeof(uint32_t));
+				vkCmdPipelineBarrier(CommandBuffer, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0, 0, 0, 1, &FillBufferBarrier, 0, 0);
+
 				vkCmdBindPipeline(CommandBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, ComputePipeline);
 
 				VkDescriptorSet ComputeDescriptorSets[] = { CameraDescriptorSet, CullDescriptorSet };
 				vkCmdBindDescriptorSets(CommandBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, ComputePipelineLayout, 0, ArrayCount(ComputeDescriptorSets), ComputeDescriptorSets, 0, 0);
 
 				vkCmdDispatch(CommandBuffer, (ObjectsCount + 31) / 32, 1, 1);
+
+				VkBufferMemoryBarrier CullBufferBarrier = CreateBufferMemoryBarrier(VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT, VK_ACCESS_INDIRECT_COMMAND_READ_BIT, CountBuffer, sizeof(uint32_t));
+				vkCmdPipelineBarrier(CommandBuffer, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_DRAW_INDIRECT_BIT, 0, 0, 0, 1, &CullBufferBarrier, 0, 0);
 
 				VkViewport Viewport = { 0.0f, float(Swapchain.Height), float(Swapchain.Width), -float(Swapchain.Height), 0.0f, 1.0f };
 				VkRect2D Scissor = { {0, 0}, {Swapchain.Width, Swapchain.Height} };
@@ -1173,7 +1202,7 @@ int main()
 				vkCmdBindVertexBuffers(CommandBuffer, 0, 1, &VertexBuffer.Buffer, &Offset);
 				vkCmdBindIndexBuffer(CommandBuffer, IndexBuffer.Buffer, 0, VK_INDEX_TYPE_UINT32);
 				
-				vkCmdDrawIndexedIndirect(CommandBuffer, IndirectBuffer.Buffer, 0, ObjectsCount, sizeof(VkDrawIndexedIndirectCommand));
+				vkCmdDrawIndexedIndirectCount(CommandBuffer, IndirectBuffer.Buffer, 0, CountBuffer.Buffer, 0, ObjectsCount, sizeof(VkDrawIndexedIndirectCommand));
 
 				vkCmdEndRenderPass(CommandBuffer);
 

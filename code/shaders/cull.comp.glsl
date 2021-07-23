@@ -42,6 +42,11 @@ layout (set = 1, binding = 1) writeonly buffer DrawCommands
 	SMeshDrawCommand DrawCommand[];
 };
 
+layout (set = 1, binding = 2) buffer DrawCounter
+{
+	uint DrawCount;
+};
+
 layout (local_size_x = 32, local_size_y = 1, local_size_z = 1) in;
 void main()
 {
@@ -53,13 +58,18 @@ void main()
 	vec4 Position = vec4(Draw[Index].Position + Scale * Draw[Index].SphereCenter, -1);
 	float Radius = Scale * Draw[Index].SphereRadius;
 
-	bool visible = true;
+	bool Visible = true;
 	for (uint I = 0; I < 6; I++)
-		visible = visible && (dot(Position, Frustum[I]) >= -Radius);
+		Visible = Visible && (dot(Position, Frustum[I]) >= -Radius);
 
-	DrawCommand[Index].IndexCount = Draw[Index].IndexCount;
-    DrawCommand[Index].InstanceCount = visible ? 1 : 0;
-    DrawCommand[Index].FirstIndex = Draw[Index].FirstIndex;
-    DrawCommand[Index].VertexOffset = Draw[Index].VertexOffset;
-    DrawCommand[Index].FirstInstance = Draw[Index].FirstInstance;
+	if(Visible)
+	{
+		uint CommandIndex = atomicAdd(DrawCount, 1);
+
+		DrawCommand[CommandIndex].IndexCount = Draw[Index].IndexCount;
+		DrawCommand[CommandIndex].InstanceCount = 1;
+		DrawCommand[CommandIndex].FirstIndex = Draw[Index].FirstIndex;
+		DrawCommand[CommandIndex].VertexOffset = Draw[Index].VertexOffset;
+		DrawCommand[CommandIndex].FirstInstance = Draw[Index].FirstInstance;
+	}
 }
