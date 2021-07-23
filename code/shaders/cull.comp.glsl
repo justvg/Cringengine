@@ -57,9 +57,7 @@ layout (set = 1, binding = 2) buffer DrawCounter
 layout (local_size_x = 32, local_size_y = 1, local_size_z = 1) in;
 void main()
 {
-	uint GroupIndex = gl_WorkGroupID.x;
-	uint ThreadIndex  = gl_LocalInvocationID.x;
-	uint Index = GroupIndex * 32 + ThreadIndex;
+	uint Index = gl_GlobalInvocationID.x;
 
 	float Scale = Draw[Index].Scale ;
 	vec4 Center = vec4(Draw[Index].Position + Scale * Draw[Index].SphereCenter, -1);

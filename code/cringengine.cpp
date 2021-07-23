@@ -214,7 +214,7 @@ VkFormat FindDepthFormat(VkPhysicalDevice PhysicalDevice)
 		vkGetPhysicalDeviceFormatProperties(PhysicalDevice, Formats[I], &FormatProps);
 
 		if ((Tiling == VK_IMAGE_TILING_OPTIMAL) && (FormatProps.optimalTilingFeatures & VK_FORMAT_FEATURE_DEPTH_STENCIL_ATTACHMENT_BIT))
-			return Formats[I];
+			return Formats[I]; 
 	}
 
 	Assert(!"Can't find depth format!");
@@ -237,7 +237,7 @@ VkRenderPass CreateRenderPass(VkDevice Device, VkFormat ColorFormat, VkFormat De
 	Attachments[1].format = DepthFormat;
 	Attachments[1].samples = VK_SAMPLE_COUNT_1_BIT;
 	Attachments[1].loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
-	Attachments[1].storeOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
+	Attachments[1].storeOp = VK_ATTACHMENT_STORE_OP_STORE;
 	Attachments[1].stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
 	Attachments[1].stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
 	Attachments[1].initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
@@ -279,7 +279,39 @@ VmaAllocator CreateVulkanMemoryAllocator(VkInstance Instance, VkPhysicalDevice P
 	return Allocator;
 }
 
-VkImageView CreateImageView(VkDevice Device, VkImage Image, VkFormat Format, VkImageAspectFlags AspectFlags)
+struct SImage
+{
+	VkImage Image;
+	VmaAllocation Allocation;
+};
+
+SImage CreateImage(VkDevice Device, VmaAllocator MemoryAllocator, VkFormat Format, uint32_t Width, uint32_t Height, uint32_t MipsCount, VkImageUsageFlags UsageFlags)
+{
+	VkImageCreateInfo CreateInfo = { VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO };
+	CreateInfo.imageType = VK_IMAGE_TYPE_2D;
+	CreateInfo.format = Format;
+	CreateInfo.extent.width = Width;
+	CreateInfo.extent.height = Height;
+	CreateInfo.extent.depth = 1;
+	CreateInfo.mipLevels = MipsCount;
+	CreateInfo.arrayLayers = 1;
+	CreateInfo.samples = VK_SAMPLE_COUNT_1_BIT;
+	CreateInfo.tiling = VK_IMAGE_TILING_OPTIMAL;
+	CreateInfo.usage = UsageFlags;
+	CreateInfo.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+
+	VmaAllocationCreateInfo AllocationCreateInfo = {};
+	AllocationCreateInfo.usage = VMA_MEMORY_USAGE_GPU_ONLY;
+
+	SImage Image = {};
+	VkCheck(vmaCreateImage(MemoryAllocator, &CreateInfo, &AllocationCreateInfo, &Image.Image, &Image.Allocation, 0));
+	Assert(Image.Image);
+	Assert(Image.Allocation);
+
+	return Image;
+}
+
+VkImageView CreateImageView(VkDevice Device, VkImage Image, VkFormat Format, uint32_t MipLevel, VkImageAspectFlags AspectFlags)
 {
 	VkImageViewCreateInfo CreateInfo = { VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO };
 	CreateInfo.image = Image;
@@ -287,6 +319,7 @@ VkImageView CreateImageView(VkDevice Device, VkImage Image, VkFormat Format, VkI
 	CreateInfo.format = Format;
 	CreateInfo.subresourceRange.aspectMask = AspectFlags;
 	CreateInfo.subresourceRange.levelCount = 1;
+	CreateInfo.subresourceRange.baseMipLevel = MipLevel;
 	CreateInfo.subresourceRange.layerCount = 1;
 
 	VkImageView ImageView = 0;
@@ -296,6 +329,33 @@ VkImageView CreateImageView(VkDevice Device, VkImage Image, VkFormat Format, VkI
 	return ImageView;
 }
 
+VkSampler CreateSampler(VkDevice Device)
+{
+	VkSamplerCreateInfo CreateInfo = { VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO };
+	CreateInfo.magFilter = VK_FILTER_NEAREST;
+	CreateInfo.minFilter = VK_FILTER_NEAREST;
+	CreateInfo.mipmapMode = VK_SAMPLER_MIPMAP_MODE_NEAREST;
+	CreateInfo.addressModeU = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
+	CreateInfo.addressModeV = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
+	CreateInfo.addressModeW = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
+	CreateInfo.minLod = 0;
+	CreateInfo.maxLod = 16.0f;
+
+	VkSampler Sampler = 0;
+	VkCheck(vkCreateSampler(Device, &CreateInfo, 0, &Sampler));
+	Assert(Sampler);
+
+	return Sampler;
+}
+
+uint32_t GetMipsCount(uint32_t Width, uint32_t Height)
+{
+	float Log = std::max(glm::log2(float(Width)), glm::log2(float(Height)));
+	uint32_t MipsCount = Log + 1;
+
+	return MipsCount;
+}
+
 struct SSwapchain
 {
 	VkSwapchainKHR VkSwapchain;
@@ -303,9 +363,11 @@ struct SSwapchain
 	std::vector<VkImageView> ImageViews;
 	std::vector<VkFramebuffer> Framebuffers;
 
-	VkImage DepthImage;
-	VmaAllocation DepthImageMemory;
+	SImage DepthImage;
 	VkImageView DepthImageView;
+
+	SImage DepthMipsImage;
+	std::vector<VkImageView> DepthMipViews;
 
 	uint32_t Width, Height;
 };
@@ -355,32 +417,20 @@ SSwapchain CreateSwapchain(VkDevice Device, VkPhysicalDevice PhysicalDevice, VkS
 	std::vector<VkImageView> ImageViews(ImageCount);
 	for (uint32_t I = 0; I < ImageCount; I++)
 	{
-		ImageViews[I] = CreateImageView(Device, Images[I], ColorFormat, VK_IMAGE_ASPECT_COLOR_BIT);
+		ImageViews[I] = CreateImageView(Device, Images[I], ColorFormat, 0, VK_IMAGE_ASPECT_COLOR_BIT);
 	}
 
-	VkImageCreateInfo DepthImageCreateInfo = { VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO };
-	DepthImageCreateInfo.imageType = VK_IMAGE_TYPE_2D;
-	DepthImageCreateInfo.format = DepthFormat;
-	DepthImageCreateInfo.extent.width = SurfaceCaps.currentExtent.width;
-	DepthImageCreateInfo.extent.height = SurfaceCaps.currentExtent.height;
-	DepthImageCreateInfo.extent.depth = 1;
-	DepthImageCreateInfo.mipLevels = 1;
-	DepthImageCreateInfo.arrayLayers = 1;
-	DepthImageCreateInfo.samples = VK_SAMPLE_COUNT_1_BIT;
-	DepthImageCreateInfo.tiling = VK_IMAGE_TILING_OPTIMAL;
-	DepthImageCreateInfo.usage = VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT;
-	DepthImageCreateInfo.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+	SImage DepthImage = CreateImage(Device, MemoryAllocator, DepthFormat, SurfaceCaps.currentExtent.width, SurfaceCaps.currentExtent.height, 1, VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT);
+	VkImageView DepthImageView = CreateImageView(Device, DepthImage.Image, DepthFormat, 0, VK_IMAGE_ASPECT_DEPTH_BIT);
 
-	VmaAllocationCreateInfo DepthAllocationCreateInfo = {};
-	DepthAllocationCreateInfo.usage = VMA_MEMORY_USAGE_GPU_ONLY;
-
-	VkImage DepthImage = 0;
-	VmaAllocation DepthImageMemory = 0;
-	VkCheck(vmaCreateImage(MemoryAllocator, &DepthImageCreateInfo, &DepthAllocationCreateInfo, &DepthImage, &DepthImageMemory, 0));
-	Assert(DepthImage);
-	Assert(DepthImageMemory);
-
-	VkImageView DepthImageView = CreateImageView(Device, DepthImage, DepthFormat, VK_IMAGE_ASPECT_DEPTH_BIT);
+	uint32_t DepthMipsCount = GetMipsCount(SurfaceCaps.currentExtent.width, SurfaceCaps.currentExtent.height) - 1;
+	SImage DepthMipsImage = CreateImage(Device, MemoryAllocator, VK_FORMAT_R32_SFLOAT, SurfaceCaps.currentExtent.width >> 1, SurfaceCaps.currentExtent.height >> 1, DepthMipsCount, VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_SAMPLED_BIT);
+	
+	std::vector<VkImageView> DepthMipViews(DepthMipsCount);
+	for (uint32_t I = 0; I < DepthMipViews.size(); I++)
+	{
+		DepthMipViews[I] = CreateImageView(Device, DepthMipsImage.Image, VK_FORMAT_R32_SFLOAT, I, VK_IMAGE_ASPECT_COLOR_BIT);
+	}
 
 	std::vector<VkFramebuffer> Framebuffers(ImageCount);
 	for (uint32_t I = 0; I < ImageCount; I++)
@@ -402,8 +452,9 @@ SSwapchain CreateSwapchain(VkDevice Device, VkPhysicalDevice PhysicalDevice, VkS
 	Swapchain.ImageViews = ImageViews;
 	Swapchain.Framebuffers = Framebuffers;
 	Swapchain.DepthImage = DepthImage;
-	Swapchain.DepthImageMemory = DepthImageMemory;
 	Swapchain.DepthImageView = DepthImageView;
+	Swapchain.DepthMipsImage = DepthMipsImage;
+	Swapchain.DepthMipViews = DepthMipViews;
 	Swapchain.Width = SurfaceCaps.currentExtent.width;
 	Swapchain.Height = SurfaceCaps.currentExtent.height;
 
@@ -420,13 +471,21 @@ void DestroySwapchain(SSwapchain Swapchain, VkDevice Device, VmaAllocator Memory
 	}
 
 	vkDestroyImageView(Device, Swapchain.DepthImageView, 0);
-	vmaDestroyImage(MemoryAllocator, Swapchain.DepthImage, Swapchain.DepthImageMemory);
+	vmaDestroyImage(MemoryAllocator, Swapchain.DepthImage.Image, Swapchain.DepthImage.Allocation);
+
+	for (uint32_t I = 0; I < Swapchain.DepthMipViews.size(); I++)
+	{
+		vkDestroyImageView(Device, Swapchain.DepthMipViews[I], 0);
+	}
+	vmaDestroyImage(MemoryAllocator, Swapchain.DepthMipsImage.Image, Swapchain.DepthMipsImage.Allocation);
 
 	vkDestroySwapchainKHR(Device, Swapchain.VkSwapchain, 0);
 }
 
-void ResizeSwapchainIfChanged(SSwapchain& Swapchain, VkDevice Device, VkPhysicalDevice PhysicalDevice, VkSurfaceKHR Surface, VkFormat ColorFormat, VkFormat DepthFormat, VkRenderPass RenderPass, VmaAllocator MemoryAllocator)
+bool ResizeSwapchainIfChanged(SSwapchain& Swapchain, VkDevice Device, VkPhysicalDevice PhysicalDevice, VkSurfaceKHR Surface, VkFormat ColorFormat, VkFormat DepthFormat, VkRenderPass RenderPass, VmaAllocator MemoryAllocator)
 {
+	bool bResized = false;
+
 	VkSurfaceCapabilitiesKHR SurfaceCaps = {};
 	VkCheck(vkGetPhysicalDeviceSurfaceCapabilitiesKHR(PhysicalDevice, Surface, &SurfaceCaps));
 
@@ -444,7 +503,11 @@ void ResizeSwapchainIfChanged(SSwapchain& Swapchain, VkDevice Device, VkPhysical
 
 		VkCheck(vkDeviceWaitIdle(Device));
 		DestroySwapchain(OldSwapchain, Device, MemoryAllocator);
+
+		bResized = true;
 	}
+
+	return bResized;
 }
 
 VkCommandPool CreateCommandPool(VkDevice Device, VkCommandPoolCreateFlags Flags, uint32_t FamilyIndex)
@@ -498,7 +561,7 @@ VkQueryPool CreateQueryPool(VkDevice Device)
 	return QueryPool;
 }
 
-VkImageMemoryBarrier CreateImageMemoryBarrier(VkAccessFlags SrcAccessMask, VkAccessFlags DstAccessMask, VkImageLayout OldLayout, VkImageLayout NewLayout, VkImage Image, VkImageAspectFlags AspectMask)
+VkImageMemoryBarrier CreateImageMemoryBarrier(VkAccessFlags SrcAccessMask, VkAccessFlags DstAccessMask, VkImageLayout OldLayout, VkImageLayout NewLayout, VkImage Image, VkImageAspectFlags AspectMask, uint32_t MipLevel = 0, uint32_t MipLevelCount = VK_REMAINING_MIP_LEVELS)
 {
 	VkImageMemoryBarrier Barrier = { VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER };
 	Barrier.srcAccessMask = SrcAccessMask;
@@ -509,8 +572,9 @@ VkImageMemoryBarrier CreateImageMemoryBarrier(VkAccessFlags SrcAccessMask, VkAcc
 	Barrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
 	Barrier.image = Image;
 	Barrier.subresourceRange.aspectMask = AspectMask;
-	Barrier.subresourceRange.levelCount = VK_REMAINING_MIP_LEVELS;
 	Barrier.subresourceRange.layerCount = VK_REMAINING_ARRAY_LAYERS;
+	Barrier.subresourceRange.baseMipLevel = MipLevel;
+	Barrier.subresourceRange.levelCount = VK_REMAINING_MIP_LEVELS;
 
 	return Barrier;
 }
@@ -617,10 +681,13 @@ VkDescriptorPool CreateDescriptorPool(VkDevice Device)
 	{
 		{ VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 10 },
 		{ VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 10 },
+		{ VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 25 },
+		{ VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 25}
 	};
 
 	VkDescriptorPoolCreateInfo CreateInfo = { VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO };
-	CreateInfo.maxSets = 10;
+	CreateInfo.flags = VK_DESCRIPTOR_POOL_CREATE_UPDATE_AFTER_BIND_BIT;
+	CreateInfo.maxSets = 30;
 	CreateInfo.poolSizeCount = ArrayCount(PoolSizes);
 	CreateInfo.pPoolSizes = PoolSizes;
 
@@ -645,7 +712,7 @@ VkDescriptorSet CreateDescriptorSet(VkDevice Device, VkDescriptorPool Descriptor
 	return DescriptorSet;
 }
 
-void UpdateDescriptorSet(VkDevice Device, VkDescriptorSet DescriptorSet, uint32_t Binding, VkDescriptorType DescriptorType, SBuffer Buffer, VkDeviceSize BufferRange)
+void UpdateDescriptorSetBuffer(VkDevice Device, VkDescriptorSet DescriptorSet, uint32_t Binding, VkDescriptorType DescriptorType, SBuffer Buffer, VkDeviceSize BufferRange)
 {
 	// TODO: Currently this function can update only one binding at once. Can be better!
 	VkDescriptorBufferInfo BufferInfo = {};
@@ -659,6 +726,24 @@ void UpdateDescriptorSet(VkDevice Device, VkDescriptorSet DescriptorSet, uint32_
 	DescriptorWrite.descriptorType = DescriptorType;
 	DescriptorWrite.pBufferInfo = &BufferInfo;
 	
+	vkUpdateDescriptorSets(Device, 1, &DescriptorWrite, 0, 0);
+}
+
+void UpdateDescriptorSetImage(VkDevice Device, VkDescriptorSet DescriptorSet, uint32_t Binding, VkDescriptorType DescriptorType, VkSampler Sampler, VkImageView ImageView, VkImageLayout ImageLayout)
+{
+	// TODO: Currently this function can update only one binding at once. Can be better!
+	VkDescriptorImageInfo ImageInfo = {};
+	ImageInfo.sampler = Sampler;
+	ImageInfo.imageView = ImageView;
+	ImageInfo.imageLayout = ImageLayout;
+
+	VkWriteDescriptorSet DescriptorWrite = { VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET };
+	DescriptorWrite.dstSet = DescriptorSet;
+	DescriptorWrite.dstBinding = Binding;
+	DescriptorWrite.descriptorCount = 1;
+	DescriptorWrite.descriptorType = DescriptorType;
+	DescriptorWrite.pImageInfo = &ImageInfo;
+
 	vkUpdateDescriptorSets(Device, 1, &DescriptorWrite, 0, 0);
 }
 
@@ -695,24 +780,28 @@ struct SCameraBuffer
 	vec4 Frustums[6];
 };
 
-struct SPushConstants
+struct SPushConstantsCompute
 {
 	uint32_t bLodEnabled;
 	uint32_t LodsCount;
 };
 
-VkPipelineLayout CreatePipelineLayout(VkDevice Device, uint32_t SetLayoutCount, const VkDescriptorSetLayout* SetLayouts)
+VkPipelineLayout CreatePipelineLayout(VkDevice Device, uint32_t SetLayoutCount, const VkDescriptorSetLayout* SetLayouts, uint32_t PushConstantsSize = 0)
 {
-	VkPushConstantRange PushConstants = {};
-	PushConstants.stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
-	PushConstants.offset = 0;
-	PushConstants.size = sizeof(SPushConstants);
-
 	VkPipelineLayoutCreateInfo CreateInfo = { VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO };
 	CreateInfo.setLayoutCount = SetLayoutCount;
 	CreateInfo.pSetLayouts = SetLayouts;
-	CreateInfo.pushConstantRangeCount = 1;
-	CreateInfo.pPushConstantRanges = &PushConstants;
+
+	if (PushConstantsSize > 0)
+	{
+		VkPushConstantRange PushConstants = {};
+		PushConstants.stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
+		PushConstants.offset = 0;
+		PushConstants.size = PushConstantsSize;
+
+		CreateInfo.pushConstantRangeCount = 1;
+		CreateInfo.pPushConstantRanges = &PushConstants;
+	}
 
 	VkPipelineLayout PipelineLayout = 0;
 	VkCheck(vkCreatePipelineLayout(Device, &CreateInfo, 0, &PipelineLayout));
@@ -1066,6 +1155,7 @@ int main()
 			SBuffer CountBuffer = CreateBuffer(MemoryAllocator, sizeof(uint32_t), VK_BUFFER_USAGE_INDIRECT_BUFFER_BIT | VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT, VMA_MEMORY_USAGE_GPU_ONLY);
 
 			VkShaderModule CS = LoadShader(Device, "shaders_bytecode\\cull.comp.spv");
+			VkShaderModule DownscaleCS = LoadShader(Device, "shaders_bytecode\\downscale.comp.spv");
 			VkShaderModule VS = LoadShader(Device, "shaders_bytecode\\default.vert.spv");
 			VkShaderModule FS = LoadShader(Device, "shaders_bytecode\\default.frag.spv");
 			
@@ -1077,13 +1167,13 @@ int main()
 
 			VkDescriptorSet CameraDescriptorSet = CreateDescriptorSet(Device, DescriptorPool, CameraDescriptorSetLayout);
 			SBuffer CameraDescriptorSetBindingBuffer = CreateBuffer(MemoryAllocator, sizeof(SCameraBuffer), VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT, VMA_MEMORY_USAGE_CPU_TO_GPU);
-			UpdateDescriptorSet(Device, CameraDescriptorSet, 0, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, CameraDescriptorSetBindingBuffer, sizeof(SCameraBuffer));
+			UpdateDescriptorSetBuffer(Device, CameraDescriptorSet, 0, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, CameraDescriptorSetBindingBuffer, sizeof(SCameraBuffer));
 
 			VkDescriptorSetLayoutBinding MeshDrawDescriptorSetLayoutBinding = CreateDescriptorSetLayoutBinding(0, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, VK_SHADER_STAGE_VERTEX_BIT);
 			VkDescriptorSetLayout MeshDrawDescriptorSetLayout = CreateDescriptorSetLayout(Device, 1, &MeshDrawDescriptorSetLayoutBinding);
 
 			VkDescriptorSet MeshDrawDescriptorSet = CreateDescriptorSet(Device, DescriptorPool, MeshDrawDescriptorSetLayout);
-			UpdateDescriptorSet(Device, MeshDrawDescriptorSet, 0, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, MeshDrawBuffer, MeshDrawBuffer.Allocation->GetSize());
+			UpdateDescriptorSetBuffer(Device, MeshDrawDescriptorSet, 0, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, MeshDrawBuffer, MeshDrawBuffer.Allocation->GetSize());
 
 			VkDescriptorSetLayout DescriptorSetLayouts[] = { CameraDescriptorSetLayout, MeshDrawDescriptorSetLayout };
 			VkPipelineLayout PipelineLayout = CreatePipelineLayout(Device, ArrayCount(DescriptorSetLayouts), DescriptorSetLayouts);
@@ -1098,13 +1188,41 @@ int main()
 			VkDescriptorSetLayout ComputeDescriptorSetLayout = CreateDescriptorSetLayout(Device, ArrayCount(ComputeDescriptorSetLayoutBindings), ComputeDescriptorSetLayoutBindings);
 
 			VkDescriptorSet CullDescriptorSet = CreateDescriptorSet(Device, DescriptorPool, ComputeDescriptorSetLayout);
-			UpdateDescriptorSet(Device, CullDescriptorSet, 0, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, MeshDrawBuffer, MeshDrawBuffer.Allocation->GetSize());
-			UpdateDescriptorSet(Device, CullDescriptorSet, 1, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, IndirectBuffer, IndirectBuffer.Allocation->GetSize());
-			UpdateDescriptorSet(Device, CullDescriptorSet, 2, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, CountBuffer, CountBuffer.Allocation->GetSize());
+			UpdateDescriptorSetBuffer(Device, CullDescriptorSet, 0, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, MeshDrawBuffer, MeshDrawBuffer.Allocation->GetSize());
+			UpdateDescriptorSetBuffer(Device, CullDescriptorSet, 1, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, IndirectBuffer, IndirectBuffer.Allocation->GetSize());
+			UpdateDescriptorSetBuffer(Device, CullDescriptorSet, 2, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, CountBuffer, CountBuffer.Allocation->GetSize());
 
 			VkDescriptorSetLayout ComputeDescriptorSetLayouts[] = { CameraDescriptorSetLayout, ComputeDescriptorSetLayout };
-			VkPipelineLayout ComputePipelineLayout = CreatePipelineLayout(Device, ArrayCount(ComputeDescriptorSetLayouts), ComputeDescriptorSetLayouts);
+			VkPipelineLayout ComputePipelineLayout = CreatePipelineLayout(Device, ArrayCount(ComputeDescriptorSetLayouts), ComputeDescriptorSetLayouts, sizeof(SPushConstantsCompute));
 			VkPipeline ComputePipeline = CreateComputePipeline(Device, ComputePipelineLayout, CS);
+
+			// Create compute depth downscale pipeline and its descriptors
+			VkDescriptorSetLayoutBinding DownscaleOutDescriptorSetLayoutBinging = CreateDescriptorSetLayoutBinding(0, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, VK_SHADER_STAGE_COMPUTE_BIT);
+			VkDescriptorSetLayoutBinding DownscaleInDescriptorSetLayoutBinging = CreateDescriptorSetLayoutBinding(1, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, VK_SHADER_STAGE_COMPUTE_BIT);
+
+			VkDescriptorSetLayoutBinding DownscaleDescriptorSetLayoutBindings[] = { DownscaleOutDescriptorSetLayoutBinging, DownscaleInDescriptorSetLayoutBinging };
+			VkDescriptorSetLayout DownscaleDescriptorSetLayout = CreateDescriptorSetLayout(Device, ArrayCount(DownscaleDescriptorSetLayoutBindings), DownscaleDescriptorSetLayoutBindings);
+
+			VkSampler Sampler = CreateSampler(Device);
+			VkDescriptorSet DownscaleDescriptorSets[16] = {};
+			for (uint32_t I = 0; I < Swapchain.DepthMipViews.size(); I++)
+			{
+				DownscaleDescriptorSets[I] = CreateDescriptorSet(Device, DescriptorPool, DownscaleDescriptorSetLayout);
+
+				if (I == 0)
+				{
+					UpdateDescriptorSetImage(Device, DownscaleDescriptorSets[I], 0, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, Sampler, Swapchain.DepthMipViews[0], VK_IMAGE_LAYOUT_GENERAL);
+					UpdateDescriptorSetImage(Device, DownscaleDescriptorSets[I], 1, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, Sampler, Swapchain.DepthImageView, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+				}
+				else
+				{
+					UpdateDescriptorSetImage(Device, DownscaleDescriptorSets[I], 0, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, Sampler, Swapchain.DepthMipViews[I], VK_IMAGE_LAYOUT_GENERAL);
+					UpdateDescriptorSetImage(Device, DownscaleDescriptorSets[I], 1, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, Sampler, Swapchain.DepthMipViews[I - 1], VK_IMAGE_LAYOUT_GENERAL);
+				}
+			}
+
+			VkPipelineLayout DownscalePipelineLayout = CreatePipelineLayout(Device, 1, &DownscaleDescriptorSetLayout, sizeof(vec2));
+			VkPipeline DownscalePipeline = CreateComputePipeline(Device, DownscalePipelineLayout, DownscaleCS);
 
 			SGeometry Geometry = {};
 			LoadMesh(Geometry, "meshes\\kitten.obj");
@@ -1150,6 +1268,11 @@ int main()
 			UploadBuffer(Device, CommandPool, CommandBuffer, GraphicsQueue, IndexBuffer, StagingBuffer, Geometry.Indices.data(), Geometry.Indices.size() * sizeof(uint32_t));
 			UploadBuffer(Device, CommandPool, CommandBuffer, GraphicsQueue, MeshDrawBuffer, StagingBuffer, MeshDraws.data(), MeshDraws.size() * sizeof(SMeshDraw));
 
+			VkEventCreateInfo CreateInfo = { VK_STRUCTURE_TYPE_EVENT_CREATE_INFO };
+			VkEvent Event = 0;
+			VkCheck(vkCreateEvent(Device, &CreateInfo, 0, &Event));
+			Assert(Event);
+
 			double FrameCpuTimeAverage = 0.0f;
 			double FrameGpuTimeAverage = 0.0f;
 			while (!glfwWindowShouldClose(Window))
@@ -1158,7 +1281,22 @@ int main()
 
 				glfwPollEvents();
 
-				ResizeSwapchainIfChanged(Swapchain, Device, PhysicalDevice, Surface, SwapchainFormat, DepthFormat, RenderPass, MemoryAllocator);
+				if (ResizeSwapchainIfChanged(Swapchain, Device, PhysicalDevice, Surface, SwapchainFormat, DepthFormat, RenderPass, MemoryAllocator))
+				{
+					for (uint32_t I = 0; I < Swapchain.DepthMipViews.size(); I++)
+					{
+						if (I == 0)
+						{
+							UpdateDescriptorSetImage(Device, DownscaleDescriptorSets[I], 0, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, Sampler, Swapchain.DepthMipViews[0], VK_IMAGE_LAYOUT_GENERAL);
+							UpdateDescriptorSetImage(Device, DownscaleDescriptorSets[I], 1, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, Sampler, Swapchain.DepthImageView, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+						}
+						else
+						{
+							UpdateDescriptorSetImage(Device, DownscaleDescriptorSets[I], 0, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, Sampler, Swapchain.DepthMipViews[I], VK_IMAGE_LAYOUT_GENERAL);
+							UpdateDescriptorSetImage(Device, DownscaleDescriptorSets[I], 1, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, Sampler, Swapchain.DepthMipViews[I - 1], VK_IMAGE_LAYOUT_GENERAL);
+						}
+					}
+				}
 
 				vec3 CameraPosition = vec3(0.0f, 0.0f, 3.0f);
 				vec3 CameraDir = glm::normalize(vec3(0.0f) - CameraPosition);
@@ -1230,8 +1368,8 @@ int main()
 				VkDescriptorSet ComputeDescriptorSets[] = { CameraDescriptorSet, CullDescriptorSet };
 				vkCmdBindDescriptorSets(CommandBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, ComputePipelineLayout, 0, ArrayCount(ComputeDescriptorSets), ComputeDescriptorSets, 0, 0);
 
-				SPushConstants PushConstants = { bGlobalLodsEnabled, LodsCount };
-				vkCmdPushConstants(CommandBuffer, ComputePipelineLayout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(SPushConstants), &PushConstants);
+				SPushConstantsCompute PushConstants = { bGlobalLodsEnabled, LodsCount };
+				vkCmdPushConstants(CommandBuffer, ComputePipelineLayout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(SPushConstantsCompute), &PushConstants);
 
 				vkCmdDispatch(CommandBuffer, (ObjectsCount + 31) / 32, 1, 1);
 
@@ -1245,6 +1383,9 @@ int main()
 
 				VkImageMemoryBarrier RenderBeginBarrier = CreateImageMemoryBarrier(0, VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, Swapchain.Images[ImageIndex], VK_IMAGE_ASPECT_COLOR_BIT);
 				vkCmdPipelineBarrier(CommandBuffer, VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT, VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT, VK_DEPENDENCY_BY_REGION_BIT, 0, 0, 0, 0, 1, &RenderBeginBarrier);
+
+				VkImageMemoryBarrier RenderBeginDepthBarrier = CreateImageMemoryBarrier(VK_ACCESS_SHADER_READ_BIT, VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL, Swapchain.DepthImage.Image, VK_IMAGE_ASPECT_DEPTH_BIT);
+				vkCmdPipelineBarrier(CommandBuffer, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT, VK_DEPENDENCY_BY_REGION_BIT, 0, 0, 0, 0, 1, &RenderBeginDepthBarrier);
 
 				VkClearValue ClearColorValue = { 0.125f, 0.25f, 0.5f };
 				VkClearValue ClearDepthValue = { 1.0f, 0.0f };
@@ -1273,6 +1414,28 @@ int main()
 
 				VkImageMemoryBarrier RenderEndBarrier = CreateImageMemoryBarrier(VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT, 0, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, VK_IMAGE_LAYOUT_PRESENT_SRC_KHR, Swapchain.Images[ImageIndex], VK_IMAGE_ASPECT_COLOR_BIT);
 				vkCmdPipelineBarrier(CommandBuffer, VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_DEPENDENCY_BY_REGION_BIT, 0, 0, 0, 0, 1, &RenderEndBarrier);
+
+				vkCmdBindPipeline(CommandBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, DownscalePipeline);
+
+				VkImageMemoryBarrier DownscaleDepthBarriers[] =
+				{
+					CreateImageMemoryBarrier(VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT, VK_ACCESS_SHADER_READ_BIT, VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, Swapchain.DepthImage.Image, VK_IMAGE_ASPECT_DEPTH_BIT),
+					CreateImageMemoryBarrier(0, VK_ACCESS_SHADER_WRITE_BIT, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_GENERAL, Swapchain.DepthMipsImage.Image, VK_IMAGE_ASPECT_COLOR_BIT),
+				};
+				vkCmdPipelineBarrier(CommandBuffer, VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_DEPENDENCY_BY_REGION_BIT, 0, 0, 0, 0, ArrayCount(DownscaleDepthBarriers), DownscaleDepthBarriers);
+
+				for (uint32_t I = 0; I < Swapchain.DepthMipViews.size(); I++)
+				{
+					vkCmdBindDescriptorSets(CommandBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, DownscalePipelineLayout, 0, 1, &DownscaleDescriptorSets[I], 0, 0);
+
+					vec2 ImageSize = vec2(std::max(Swapchain.Width >> (I + 1), 1u), std::max(Swapchain.Height >> (I + 1), 1u));
+					vkCmdPushConstants(CommandBuffer, DownscalePipelineLayout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(vec2), &ImageSize);
+
+					vkCmdDispatch(CommandBuffer, ((uint32_t)ImageSize.x + 31) / 32, ((uint32_t)ImageSize.y + 31) / 32, 1);
+
+					VkImageMemoryBarrier MipDownscaleDepthBarrier = CreateImageMemoryBarrier(VK_ACCESS_SHADER_WRITE_BIT, VK_ACCESS_SHADER_READ_BIT, VK_IMAGE_LAYOUT_GENERAL, VK_IMAGE_LAYOUT_GENERAL, Swapchain.DepthMipsImage.Image, VK_IMAGE_ASPECT_COLOR_BIT, I, 1);
+					vkCmdPipelineBarrier(CommandBuffer, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_DEPENDENCY_BY_REGION_BIT, 0, 0, 0, 0, 1, &MipDownscaleDepthBarrier);
+				}
 
 				vkCmdWriteTimestamp(CommandBuffer, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, QueryPool, 1);
 

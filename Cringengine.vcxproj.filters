@@ -132,8 +132,9 @@
   <ItemGroup>
     <CustomBuild Include="code\shaders\default.frag.glsl" />
     <CustomBuild Include="code\shaders\default.vert.glsl" />
+    <CustomBuild Include="code\shaders\cull.comp.glsl" />
   </ItemGroup>
   <ItemGroup>
-    <None Include="code\shaders\cull.comp.glsl" />
+    <None Include="code\shaders\downscale.comp.glsl" />
   </ItemGroup>
 </Project>
