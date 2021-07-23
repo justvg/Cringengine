@@ -691,14 +691,28 @@ struct SCameraBuffer
 	mat4 View;
 	mat4 Proj;
 
+	vec4 CameraPosition;
 	vec4 Frustums[6];
+};
+
+struct SPushConstants
+{
+	uint32_t bLodEnabled;
+	uint32_t LodsCount;
 };
 
 VkPipelineLayout CreatePipelineLayout(VkDevice Device, uint32_t SetLayoutCount, const VkDescriptorSetLayout* SetLayouts)
 {
+	VkPushConstantRange PushConstants = {};
+	PushConstants.stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
+	PushConstants.offset = 0;
+	PushConstants.size = sizeof(SPushConstants);
+
 	VkPipelineLayoutCreateInfo CreateInfo = { VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO };
 	CreateInfo.setLayoutCount = SetLayoutCount;
 	CreateInfo.pSetLayouts = SetLayouts;
+	CreateInfo.pushConstantRangeCount = 1;
+	CreateInfo.pPushConstantRanges = &PushConstants;
 
 	VkPipelineLayout PipelineLayout = 0;
 	VkCheck(vkCreatePipelineLayout(Device, &CreateInfo, 0, &PipelineLayout));
@@ -713,13 +727,14 @@ struct SVertex
 	vec3 Normal;
 };
 
+const uint32_t LodsCount = 7;
 struct SMesh
 {
 	vec3 SphereCenter;
 	float SphereRadius;
 
-	uint32_t IndexCount;
-	uint32_t IndexOffset;
+	uint32_t IndexCount[LodsCount];
+	uint32_t IndexOffset[LodsCount];
 	uint32_t VertexOffset;
 };
 
@@ -739,8 +754,8 @@ struct SMeshDraw
 	float Scale;
 	quat Orientation;
 
-	uint32_t IndexCount;
-	uint32_t IndexOffset;
+	uint32_t IndexCount[LodsCount];
+	uint32_t IndexOffset[LodsCount];
 	uint32_t VertexOffset;
 	uint32_t FirstInstance;
 };
@@ -793,41 +808,72 @@ void LoadMesh(SGeometry& Geometry, const char* Path)
 	Assert(VertexOffset == IndexCount);
 	fast_obj_destroy(File);
 
-	std::vector<uint32_t> Remap(IndexCount);
-	size_t UniqueVertices = meshopt_generateVertexRemap(Remap.data(), 0, IndexCount, Vertices.data(), IndexCount, sizeof(SVertex));
-
-	size_t PrevVertexCount = Geometry.Vertices.size();
-	size_t PrevIndexCount = Geometry.Indices.size();
-	Geometry.Vertices.resize(PrevVertexCount + UniqueVertices);
-	Geometry.Indices.resize(PrevIndexCount + IndexCount);
-
-	meshopt_remapVertexBuffer(Geometry.Vertices.data() + PrevVertexCount, Vertices.data(), IndexCount, sizeof(SVertex), Remap.data());
-	meshopt_remapIndexBuffer(Geometry.Indices.data() + PrevIndexCount, 0, IndexCount, Remap.data());
-
 	vec3 SphereCenter = vec3(0.0f);
-	for (uint32_t I = 0; I < UniqueVertices; I++)
+	for (uint32_t I = 0; I < IndexCount; I++)
 	{
-		SVertex* Vertex = (SVertex*)Geometry.Vertices.data() + PrevVertexCount + I;
+		SVertex* Vertex = (SVertex*)Vertices.data() + I;
 		SphereCenter += Vertex->Position;
 	}
-	SphereCenter /= UniqueVertices;
+	SphereCenter /= IndexCount;
 
 	float SphereRadius = 0.0f;
-	for (uint32_t I = 0; I < UniqueVertices; I++)
+	for (uint32_t I = 0; I < IndexCount; I++)
 	{
-		SVertex* Vertex = (SVertex*)Geometry.Vertices.data() + PrevVertexCount + I;
+		SVertex* Vertex = (SVertex*)Vertices.data() + I;
 		float Length = glm::length(Vertex->Position - SphereCenter);
 		if (Length > SphereRadius)
 			SphereRadius = Length;
 	}
 
+	std::vector<uint32_t> Remap(IndexCount);
+	size_t UniqueVerticesCount = meshopt_generateVertexRemap(Remap.data(), 0, IndexCount, Vertices.data(), IndexCount, sizeof(SVertex));
+
+	std::vector<SVertex> UniqueVertices(UniqueVerticesCount);
+	std::vector<uint32_t> UniqueIndices(IndexCount);
+
+	meshopt_remapVertexBuffer(UniqueVertices.data(), Vertices.data(), IndexCount, sizeof(SVertex), Remap.data());
+	meshopt_remapIndexBuffer(UniqueIndices.data(), 0, IndexCount, Remap.data());
+
+	meshopt_optimizeVertexCache(UniqueIndices.data(), UniqueIndices.data(), IndexCount, UniqueVerticesCount);
+	meshopt_optimizeVertexFetch(UniqueVertices.data(), UniqueIndices.data(), IndexCount, UniqueVertices.data(), UniqueVerticesCount, sizeof(SVertex));
+
+	uint32_t PrevVertexCount = Geometry.Vertices.size();
+
+	Geometry.Vertices.insert(Geometry.Vertices.end(), UniqueVertices.begin(), UniqueVertices.end());
+
 	SMesh Mesh = {};
 	Mesh.SphereCenter = SphereCenter;
 	Mesh.SphereRadius = SphereRadius;
 	Mesh.VertexOffset = PrevVertexCount;
-	Mesh.IndexOffset = PrevIndexCount;
-	Mesh.IndexCount = IndexCount;
+	
+	std::vector<uint32_t> LodIncides = UniqueIndices;
+	for (uint32_t I = 0; I < LodsCount; I++)
+	{
+		if (I == 0)
+		{
+			uint32_t PrevIndexCount = Geometry.Indices.size();
+			Geometry.Indices.insert(Geometry.Indices.end(), UniqueIndices.begin(), UniqueIndices.end());
+			
+			Mesh.IndexOffset[I] = PrevIndexCount;
+			Mesh.IndexCount[I] = UniqueIndices.size();
+		}
+		else
+		{
+			size_t NextIndicesTarget = size_t(0.75*double(LodIncides.size()));
+			size_t NewIndicesCount = meshopt_simplify(LodIncides.data(), LodIncides.data(), LodIncides.size(), (float*)UniqueVertices.data(), UniqueVertices.size(), sizeof(SVertex), NextIndicesTarget, 0.2f);
+			Assert(NewIndicesCount < LodIncides.size())
 
+			LodIncides.resize(NewIndicesCount);
+			meshopt_optimizeVertexCache(LodIncides.data(), LodIncides.data(), NewIndicesCount, UniqueVerticesCount);
+
+			uint32_t PrevIndexCount = Geometry.Indices.size();
+			Geometry.Indices.insert(Geometry.Indices.end(), LodIncides.begin(), LodIncides.end());
+
+			Mesh.IndexOffset[I] = PrevIndexCount;
+			Mesh.IndexCount[I] = NewIndicesCount;
+		}
+	}
+	
 	Geometry.Meshes.push_back(Mesh);
 }
 
@@ -939,6 +985,7 @@ VkPipeline CreateComputePipeline(VkDevice Device, VkPipelineLayout PipelineLayou
 }
 
 static bool bGlobalCullingEnabled = true;
+static bool bGlobalLodsEnabled = true;
 
 void GLFWKeyCallback(GLFWwindow* Window, int Key, int Scancode, int Action, int Mods)
 {
@@ -951,6 +998,17 @@ void GLFWKeyCallback(GLFWwindow* Window, int Key, int Scancode, int Action, int 
 		else if (Action == GLFW_RELEASE)
 		{
 			bGlobalCullingEnabled = true;
+		}
+	}
+	else if (Key == GLFW_KEY_L)
+	{
+		if (Action == GLFW_PRESS)
+		{
+			bGlobalLodsEnabled = false;
+		}
+		else if (Action == GLFW_RELEASE)
+		{
+			bGlobalLodsEnabled = true;
 		}
 	}
 }
@@ -1052,7 +1110,7 @@ int main()
 			LoadMesh(Geometry, "meshes\\kitten.obj");
 			LoadMesh(Geometry, "meshes\\bunny.obj");
 
-			uint32_t ObjectsCount = 10000;
+			uint32_t ObjectsCount = 100000;
 			if (ObjectsCount & 31)
 				ObjectsCount += 32 - (ObjectsCount & 31);
 			
@@ -1079,8 +1137,11 @@ int main()
 				vec3 Axis = vec3((float(rand()) / RAND_MAX) * 2 - 1, (float(rand()) / RAND_MAX) * 2 - 1, (float(rand()) / RAND_MAX) * 2 - 1);
 				MeshDraw.Orientation = glm::rotate(quat(1, 0, 0, 0), Angle, Axis);
 
-				MeshDraw.IndexCount = Geometry.Meshes[MeshIndex].IndexCount;
-				MeshDraw.IndexOffset = Geometry.Meshes[MeshIndex].IndexOffset;
+				for (uint32_t J = 0; J < LodsCount; J++)
+				{
+					MeshDraw.IndexCount[J] = Geometry.Meshes[MeshIndex].IndexCount[J];
+					MeshDraw.IndexOffset[J] = Geometry.Meshes[MeshIndex].IndexOffset[J];
+				}
 				MeshDraw.VertexOffset = Geometry.Meshes[MeshIndex].VertexOffset;
 				MeshDraw.FirstInstance = I;
 			}
@@ -1115,6 +1176,7 @@ int main()
 				SCameraBuffer CameraBufferData = {};
 				CameraBufferData.View = glm::lookAt(CameraPosition, CameraPosition + CameraDir, CameraUp);
 				CameraBufferData.Proj = glm::perspective(FoV, AspectRatio, CameraNear, CameraFar);
+				CameraBufferData.CameraPosition = vec4(CameraPosition, 0.0f);
 
 				if (bGlobalCullingEnabled)
 				{
@@ -1167,6 +1229,9 @@ int main()
 
 				VkDescriptorSet ComputeDescriptorSets[] = { CameraDescriptorSet, CullDescriptorSet };
 				vkCmdBindDescriptorSets(CommandBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, ComputePipelineLayout, 0, ArrayCount(ComputeDescriptorSets), ComputeDescriptorSets, 0, 0);
+
+				SPushConstants PushConstants = { bGlobalLodsEnabled, LodsCount };
+				vkCmdPushConstants(CommandBuffer, ComputePipelineLayout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(SPushConstants), &PushConstants);
 
 				vkCmdDispatch(CommandBuffer, (ObjectsCount + 31) / 32, 1, 1);
 
@@ -1248,7 +1313,9 @@ int main()
 				FrameGpuTimeAverage = 0.95*FrameGpuTimeAverage + 0.05*FrameGpuTime;
 
 				char Title[256];
-				sprintf(Title, "cpu: %.2f ms; gpu: %.2f ms; culling:%s;", FrameCpuTimeAverage, FrameGpuTimeAverage, bGlobalCullingEnabled ? "ON" : "OFF");
+				sprintf(Title, "cpu: %.2f ms; gpu: %.2f ms; culling: %s; lods: %s;", FrameCpuTimeAverage, FrameGpuTimeAverage, 
+																					 bGlobalCullingEnabled ? "ON" : "OFF",
+																					 bGlobalLodsEnabled ? "ON" : "OFF");
 
 				glfwSetWindowTitle(Window, Title);
 			}

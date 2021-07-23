@@ -1,10 +1,17 @@
 #version 460
 
+layout (push_constant) uniform PushConstants
+{
+	uint bLodEnabled;
+	uint LodsCount;
+};
+
 layout (set = 0, binding = 0) uniform CameraBuffer
 {
 	mat4 View;
 	mat4 Proj;
-	
+
+	vec4 CameraPosition;	
 	vec4 Frustum[6];
 };
 
@@ -17,8 +24,8 @@ struct SMeshDraw
 	float Scale;
 	vec4 Orientation;
 
-	uint IndexCount;
-	uint FirstIndex;
+	uint IndexCount[7];
+	uint FirstIndex[7];
 	uint VertexOffset;
 	uint FirstInstance;
 };
@@ -55,20 +62,24 @@ void main()
 	uint Index = GroupIndex * 32 + ThreadIndex;
 
 	float Scale = Draw[Index].Scale ;
-	vec4 Position = vec4(Draw[Index].Position + Scale * Draw[Index].SphereCenter, -1);
+	vec4 Center = vec4(Draw[Index].Position + Scale * Draw[Index].SphereCenter, -1);
 	float Radius = Scale * Draw[Index].SphereRadius;
 
-	bool Visible = true;
+	bool bVisible = true;
 	for (uint I = 0; I < 6; I++)
-		Visible = Visible && (dot(Position, Frustum[I]) >= -Radius);
+		bVisible = bVisible && (dot(Center, Frustum[I]) >= -Radius);
 
-	if(Visible)
+	if(bVisible)
 	{
 		uint CommandIndex = atomicAdd(DrawCount, 1);
 
-		DrawCommand[CommandIndex].IndexCount = Draw[Index].IndexCount;
+		float Distance = length(Center.xyz - CameraPosition.xyz) - Radius;
+		float LodDistance = log2(max(Distance, 1.0));
+		int LodIndex = bLodEnabled > 0 ? clamp(int(LodDistance) - 1, 0, int(LodsCount) - 1) : 0;
+
+		DrawCommand[CommandIndex].IndexCount = Draw[Index].IndexCount[LodIndex];
 		DrawCommand[CommandIndex].InstanceCount = 1;
-		DrawCommand[CommandIndex].FirstIndex = Draw[Index].FirstIndex;
+		DrawCommand[CommandIndex].FirstIndex = Draw[Index].FirstIndex[LodIndex];
 		DrawCommand[CommandIndex].VertexOffset = Draw[Index].VertexOffset;
 		DrawCommand[CommandIndex].FirstInstance = Draw[Index].FirstInstance;
 	}

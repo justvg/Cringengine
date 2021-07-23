@@ -22,8 +22,8 @@ struct SMeshDraw
 	float Scale;
 	vec4 Orientation;
 
-	uint IndexCount;
-	uint FirstIndex;
+	uint IndexCount[7];
+	uint FirstIndex[7];
 	uint VertexOffset;
 	uint FirstInstance;
 };
