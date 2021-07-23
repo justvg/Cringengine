@@ -1,7 +1,22 @@
 #version 460
 
+layout (set = 0, binding = 0) uniform CameraBuffer
+{
+	mat4 View;
+	mat4 Proj;
+	
+	vec4 Frustum[6];
+};
+
 struct SMeshDraw
 {
+	vec3 SphereCenter;
+	float SphereRadius;
+
+	vec3 Position;
+	float Scale;
+	vec4 Orientation;
+
 	uint IndexCount;
 	uint FirstIndex;
 	uint VertexOffset;
@@ -17,12 +32,12 @@ struct SMeshDrawCommand
     uint FirstInstance;
 };
 
-layout (set = 0, binding = 0) readonly buffer Draws
+layout (set = 1, binding = 0) readonly buffer Draws
 {
 	SMeshDraw Draw[];
 };
 
-layout (set = 0, binding = 1) writeonly buffer DrawCommands
+layout (set = 1, binding = 1) writeonly buffer DrawCommands
 {
 	SMeshDrawCommand DrawCommand[];
 };
@@ -34,8 +49,16 @@ void main()
 	uint ThreadIndex  = gl_LocalInvocationID.x;
 	uint Index = GroupIndex * 32 + ThreadIndex;
 
+	float Scale = Draw[Index].Scale ;
+	vec4 Position = vec4(Draw[Index].Position + Scale * Draw[Index].SphereCenter, -1);
+	float Radius = Scale * Draw[Index].SphereRadius;
+
+	bool visible = true;
+	for (uint I = 0; I < 6; I++)
+		visible = visible && (dot(Position, Frustum[I]) >= -Radius);
+
 	DrawCommand[Index].IndexCount = Draw[Index].IndexCount;
-    DrawCommand[Index].InstanceCount = 1;
+    DrawCommand[Index].InstanceCount = visible ? 1 : 0;
     DrawCommand[Index].FirstIndex = Draw[Index].FirstIndex;
     DrawCommand[Index].VertexOffset = Draw[Index].VertexOffset;
     DrawCommand[Index].FirstInstance = Draw[Index].FirstInstance;

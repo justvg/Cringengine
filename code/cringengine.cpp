@@ -672,27 +672,15 @@ struct SCameraBuffer
 {
 	mat4 View;
 	mat4 Proj;
-};
 
-struct SObjectTransform
-{
-	vec3 Position;
-	float Scale;
-	quat Orientation;
+	vec4 Frustums[6];
 };
 
 VkPipelineLayout CreatePipelineLayout(VkDevice Device, uint32_t SetLayoutCount, const VkDescriptorSetLayout* SetLayouts)
 {
-	VkPushConstantRange PushConstantRange = {};
-	PushConstantRange.stageFlags = VK_SHADER_STAGE_VERTEX_BIT;
-	PushConstantRange.offset = 0;
-	PushConstantRange.size = sizeof(SObjectTransform);
-
 	VkPipelineLayoutCreateInfo CreateInfo = { VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO };
 	CreateInfo.setLayoutCount = SetLayoutCount;
 	CreateInfo.pSetLayouts = SetLayouts;
-	CreateInfo.pushConstantRangeCount = 1;
-	CreateInfo.pPushConstantRanges = &PushConstantRange;
 
 	VkPipelineLayout PipelineLayout = 0;
 	VkCheck(vkCreatePipelineLayout(Device, &CreateInfo, 0, &PipelineLayout));
@@ -709,6 +697,9 @@ struct SVertex
 
 struct SMesh
 {
+	vec3 SphereCenter;
+	float SphereRadius;
+
 	uint32_t IndexCount;
 	uint32_t IndexOffset;
 	uint32_t VertexOffset;
@@ -723,6 +714,13 @@ struct SGeometry
 
 struct SMeshDraw
 {
+	vec3 SphereCenter;
+	float SphereRadius;
+
+	vec3 Position;
+	float Scale;
+	quat Orientation;
+
 	uint32_t IndexCount;
 	uint32_t IndexOffset;
 	uint32_t VertexOffset;
@@ -788,7 +786,26 @@ void LoadMesh(SGeometry& Geometry, const char* Path)
 	meshopt_remapVertexBuffer(Geometry.Vertices.data() + PrevVertexCount, Vertices.data(), IndexCount, sizeof(SVertex), Remap.data());
 	meshopt_remapIndexBuffer(Geometry.Indices.data() + PrevIndexCount, 0, IndexCount, Remap.data());
 
+	vec3 SphereCenter = vec3(0.0f);
+	for (uint32_t I = 0; I < UniqueVertices; I++)
+	{
+		SVertex* Vertex = (SVertex*)Geometry.Vertices.data() + PrevVertexCount + I;
+		SphereCenter += Vertex->Position;
+	}
+	SphereCenter /= UniqueVertices;
+
+	float SphereRadius = 0.0f;
+	for (uint32_t I = 0; I < UniqueVertices; I++)
+	{
+		SVertex* Vertex = (SVertex*)Geometry.Vertices.data() + PrevVertexCount + I;
+		float Length = glm::length(Vertex->Position - SphereCenter);
+		if (Length > SphereRadius)
+			SphereRadius = Length;
+	}
+
 	SMesh Mesh = {};
+	Mesh.SphereCenter = SphereCenter;
+	Mesh.SphereRadius = SphereRadius;
 	Mesh.VertexOffset = PrevVertexCount;
 	Mesh.IndexOffset = PrevIndexCount;
 	Mesh.IndexCount = IndexCount;
@@ -903,6 +920,23 @@ VkPipeline CreateComputePipeline(VkDevice Device, VkPipelineLayout PipelineLayou
 	return ComputePipeline;
 }
 
+static bool bGlobalCullingEnabled = true;
+
+void GLFWKeyCallback(GLFWwindow* Window, int Key, int Scancode, int Action, int Mods)
+{
+	if (Key == GLFW_KEY_C)
+	{
+		if (Action == GLFW_PRESS)
+		{
+			bGlobalCullingEnabled = false;
+		}
+		else if (Action == GLFW_RELEASE)
+		{
+			bGlobalCullingEnabled = true;
+		}
+	}
+}
+
 int main()
 {
 	if (glfwInit())
@@ -911,6 +945,8 @@ int main()
 		GLFWwindow* Window = glfwCreateWindow(1024, 720, "Cringengine", 0, 0);
 		if (Window)
 		{
+			glfwSetKeyCallback(Window, GLFWKeyCallback);
+
 			VkInstance Instance = CreateInstance();
 			VkPhysicalDevice PhysicalDevice = PickPhysicalDevice(Instance);
 
@@ -949,8 +985,7 @@ int main()
 			SBuffer StagingBuffer = CreateBuffer(MemoryAllocator, 64 * 1024 * 1024, VK_BUFFER_USAGE_TRANSFER_SRC_BIT, VMA_MEMORY_USAGE_CPU_ONLY);
 			SBuffer VertexBuffer = CreateBuffer(MemoryAllocator, 64 * 1024 * 1024, VK_BUFFER_USAGE_VERTEX_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT, VMA_MEMORY_USAGE_GPU_ONLY);
 			SBuffer IndexBuffer = CreateBuffer(MemoryAllocator, 64 * 1024 * 1024, VK_BUFFER_USAGE_INDEX_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT, VMA_MEMORY_USAGE_GPU_ONLY);
-			SBuffer StorageBuffer = CreateBuffer(MemoryAllocator, 64 * 1024 * 1024, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT, VMA_MEMORY_USAGE_GPU_ONLY);
-			SBuffer CullingBuffer = CreateBuffer(MemoryAllocator, 64 * 1024 * 1024, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT, VMA_MEMORY_USAGE_GPU_ONLY);
+			SBuffer MeshDrawBuffer = CreateBuffer(MemoryAllocator, 64 * 1024 * 1024, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT, VMA_MEMORY_USAGE_GPU_ONLY);
 			SBuffer IndirectBuffer = CreateBuffer(MemoryAllocator, 64 * 1024 * 1024, VK_BUFFER_USAGE_INDIRECT_BUFFER_BIT | VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, VMA_MEMORY_USAGE_GPU_ONLY);
 
 			VkShaderModule CS = LoadShader(Device, "shaders_bytecode\\cull.comp.spv");
@@ -960,20 +995,20 @@ int main()
 			VkDescriptorPool DescriptorPool = CreateDescriptorPool(Device);
 
 			// Create graphics pipeline and its descriptors
-			VkDescriptorSetLayoutBinding CameraDescriptorSetLayoutBinding = CreateDescriptorSetLayoutBinding(0, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, VK_SHADER_STAGE_VERTEX_BIT);
+			VkDescriptorSetLayoutBinding CameraDescriptorSetLayoutBinding = CreateDescriptorSetLayoutBinding(0, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_COMPUTE_BIT);
 			VkDescriptorSetLayout CameraDescriptorSetLayout = CreateDescriptorSetLayout(Device, 1, &CameraDescriptorSetLayoutBinding);
 
 			VkDescriptorSet CameraDescriptorSet = CreateDescriptorSet(Device, DescriptorPool, CameraDescriptorSetLayout);
-			SBuffer CameraDescriptorSetBindingBuffer = CreateBuffer(MemoryAllocator, 2*sizeof(mat4), VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT, VMA_MEMORY_USAGE_CPU_TO_GPU);
-			UpdateDescriptorSet(Device, CameraDescriptorSet, 0, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, CameraDescriptorSetBindingBuffer, 2*sizeof(mat4));
+			SBuffer CameraDescriptorSetBindingBuffer = CreateBuffer(MemoryAllocator, sizeof(SCameraBuffer), VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT, VMA_MEMORY_USAGE_CPU_TO_GPU);
+			UpdateDescriptorSet(Device, CameraDescriptorSet, 0, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, CameraDescriptorSetBindingBuffer, sizeof(SCameraBuffer));
 
-			VkDescriptorSetLayoutBinding ObjectsDescriptorSetLayoutBinding = CreateDescriptorSetLayoutBinding(0, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, VK_SHADER_STAGE_VERTEX_BIT);
-			VkDescriptorSetLayout ObjectsDescriptorSetLayout = CreateDescriptorSetLayout(Device, 1, &ObjectsDescriptorSetLayoutBinding);
+			VkDescriptorSetLayoutBinding MeshDrawDescriptorSetLayoutBinding = CreateDescriptorSetLayoutBinding(0, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, VK_SHADER_STAGE_VERTEX_BIT);
+			VkDescriptorSetLayout MeshDrawDescriptorSetLayout = CreateDescriptorSetLayout(Device, 1, &MeshDrawDescriptorSetLayoutBinding);
 
-			VkDescriptorSet ObjectsDescriptorSet = CreateDescriptorSet(Device, DescriptorPool, ObjectsDescriptorSetLayout);
-			UpdateDescriptorSet(Device, ObjectsDescriptorSet, 0, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, StorageBuffer, StorageBuffer.Allocation->GetSize());
+			VkDescriptorSet MeshDrawDescriptorSet = CreateDescriptorSet(Device, DescriptorPool, MeshDrawDescriptorSetLayout);
+			UpdateDescriptorSet(Device, MeshDrawDescriptorSet, 0, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, MeshDrawBuffer, MeshDrawBuffer.Allocation->GetSize());
 
-			VkDescriptorSetLayout DescriptorSetLayouts[] = { CameraDescriptorSetLayout, ObjectsDescriptorSetLayout };
+			VkDescriptorSetLayout DescriptorSetLayouts[] = { CameraDescriptorSetLayout, MeshDrawDescriptorSetLayout };
 			VkPipelineLayout PipelineLayout = CreatePipelineLayout(Device, ArrayCount(DescriptorSetLayouts), DescriptorSetLayouts);
 			VkPipeline GraphicsPipeline = CreateGraphicsPipeline(Device, RenderPass, PipelineLayout, VS, FS);
 
@@ -985,10 +1020,11 @@ int main()
 			VkDescriptorSetLayout ComputeDescriptorSetLayout = CreateDescriptorSetLayout(Device, ArrayCount(ComputeDescriptorSetLayoutBindings), ComputeDescriptorSetLayoutBindings);
 
 			VkDescriptorSet CullDescriptorSet = CreateDescriptorSet(Device, DescriptorPool, ComputeDescriptorSetLayout);
-			UpdateDescriptorSet(Device, CullDescriptorSet, 0, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, CullingBuffer, CullingBuffer.Allocation->GetSize());
+			UpdateDescriptorSet(Device, CullDescriptorSet, 0, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, MeshDrawBuffer, MeshDrawBuffer.Allocation->GetSize());
 			UpdateDescriptorSet(Device, CullDescriptorSet, 1, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, IndirectBuffer, IndirectBuffer.Allocation->GetSize());
 
-			VkPipelineLayout ComputePipelineLayout = CreatePipelineLayout(Device, 1, &ComputeDescriptorSetLayout);
+			VkDescriptorSetLayout ComputeDescriptorSetLayouts[] = { CameraDescriptorSetLayout, ComputeDescriptorSetLayout };
+			VkPipelineLayout ComputePipelineLayout = CreatePipelineLayout(Device, ArrayCount(ComputeDescriptorSetLayouts), ComputeDescriptorSetLayouts);
 			VkPipeline ComputePipeline = CreateComputePipeline(Device, ComputePipelineLayout, CS);
 
 			SGeometry Geometry = {};
@@ -998,35 +1034,29 @@ int main()
 			uint32_t ObjectsCount = 10000;
 			if (ObjectsCount & 31)
 				ObjectsCount += 32 - (ObjectsCount & 31);
-			std::vector<SObjectTransform> Transforms(ObjectsCount);
-			std::vector<uint32_t> MeshIndices(ObjectsCount);
-
-			const float SceneRadius = 100.0f;
-			for (uint32_t I = 0; I < ObjectsCount; I++)
-			{
-				SObjectTransform& Transform = Transforms[I];
 			
-				MeshIndices[I] = rand() % Geometry.Meshes.size();
-
-				Transform.Position.x = 2.0f * SceneRadius * (float(rand()) / RAND_MAX) - SceneRadius;
-				Transform.Position.y = 2.0f * SceneRadius * (float(rand()) / RAND_MAX) - SceneRadius;
-				Transform.Position.z = 2.0f * SceneRadius * (float(rand()) / RAND_MAX) - SceneRadius;
-
-				Transform.Scale = ((float(rand()) / RAND_MAX) + 1) * 2;
-				// Scaling for bunny.obj
-				if (MeshIndices[I] == 1)
-					Transform.Scale *= 0.25f;
-
-				float Angle = glm::radians(90.0f * (float(rand()) / RAND_MAX));
-				vec3 Axis = vec3((float(rand()) / RAND_MAX) * 2 - 1, (float(rand()) / RAND_MAX) * 2 - 1, (float(rand()) / RAND_MAX) * 2 - 1);
-				Transform.Orientation = glm::rotate(quat(1, 0, 0, 0), Angle, Axis);
-			}
-
+			const float SceneRadius = 100.0f;
 			std::vector<SMeshDraw> MeshDraws(ObjectsCount);
 			for (uint32_t I = 0; I < ObjectsCount; I++)
 			{
 				SMeshDraw& MeshDraw = MeshDraws[I];
-				uint32_t MeshIndex = MeshIndices[I];
+				uint32_t MeshIndex = rand() % Geometry.Meshes.size();
+
+				MeshDraw.SphereCenter = Geometry.Meshes[MeshIndex].SphereCenter;
+				MeshDraw.SphereRadius = Geometry.Meshes[MeshIndex].SphereRadius;
+
+				MeshDraw.Position.x = 2.0f * SceneRadius * (float(rand()) / RAND_MAX) - SceneRadius;
+				MeshDraw.Position.y = 2.0f * SceneRadius * (float(rand()) / RAND_MAX) - SceneRadius;
+				MeshDraw.Position.z = 2.0f * SceneRadius * (float(rand()) / RAND_MAX) - SceneRadius;
+
+				MeshDraw.Scale = ((float(rand()) / RAND_MAX) + 1) * 2;
+				// Scaling for bunny.obj
+				if (MeshIndex == 1)
+					MeshDraw.Scale *= 0.25f;
+
+				float Angle = glm::radians(90.0f * (float(rand()) / RAND_MAX));
+				vec3 Axis = vec3((float(rand()) / RAND_MAX) * 2 - 1, (float(rand()) / RAND_MAX) * 2 - 1, (float(rand()) / RAND_MAX) * 2 - 1);
+				MeshDraw.Orientation = glm::rotate(quat(1, 0, 0, 0), Angle, Axis);
 
 				MeshDraw.IndexCount = Geometry.Meshes[MeshIndex].IndexCount;
 				MeshDraw.IndexOffset = Geometry.Meshes[MeshIndex].IndexOffset;
@@ -1036,8 +1066,7 @@ int main()
 
 			UploadBuffer(Device, CommandPool, CommandBuffer, GraphicsQueue, VertexBuffer, StagingBuffer, Geometry.Vertices.data(), Geometry.Vertices.size() * sizeof(SVertex));
 			UploadBuffer(Device, CommandPool, CommandBuffer, GraphicsQueue, IndexBuffer, StagingBuffer, Geometry.Indices.data(), Geometry.Indices.size() * sizeof(uint32_t));
-			UploadBuffer(Device, CommandPool, CommandBuffer, GraphicsQueue, StorageBuffer, StagingBuffer, Transforms.data(), Transforms.size() * sizeof(SObjectTransform));
-			UploadBuffer(Device, CommandPool, CommandBuffer, GraphicsQueue, CullingBuffer, StagingBuffer, MeshDraws.data(), MeshDraws.size() * sizeof(SMeshDraw));
+			UploadBuffer(Device, CommandPool, CommandBuffer, GraphicsQueue, MeshDrawBuffer, StagingBuffer, MeshDraws.data(), MeshDraws.size() * sizeof(SMeshDraw));
 
 			double FrameCpuTimeAverage = 0.0f;
 			double FrameGpuTimeAverage = 0.0f;
@@ -1049,9 +1078,51 @@ int main()
 
 				ResizeSwapchainIfChanged(Swapchain, Device, PhysicalDevice, Surface, SwapchainFormat, DepthFormat, RenderPass, MemoryAllocator);
 
+				vec3 CameraPosition = vec3(0.0f, 0.0f, 3.0f);
+				vec3 CameraDir = glm::normalize(vec3(0.0f) - CameraPosition);
+				vec3 CameraRight = glm::normalize(glm::cross(CameraDir, vec3(0.0f, 1.0f, 0.0f)));
+				vec3 CameraUp = glm::cross(CameraRight, CameraDir);
+				float CameraNear = 0.1f;
+				float CameraFar = 100000.0f;
+				float FoV = 70.0f;
+				float AspectRatio = float(Swapchain.Width) / float(Swapchain.Height);
+				float NearHalfHeight = CameraNear * tanf(0.5f*glm::radians(FoV));
+				float NearHalfWidth = AspectRatio * NearHalfHeight;
+				float FarHalfHeight = CameraFar * tanf(0.5f*glm::radians(FoV));
+				float FarHalfWidth = AspectRatio * FarHalfHeight;
+
 				SCameraBuffer CameraBufferData = {};
-				CameraBufferData.View = glm::lookAt(vec3(0.0f, 0.0f, 3.0f), vec3(0.0f), vec3(0.0f, 1.0f, 0.0f));
-				CameraBufferData.Proj = glm::perspective(70.0f, float(Swapchain.Width) / float(Swapchain.Height), 0.1f, FLT_MAX);
+				CameraBufferData.View = glm::lookAt(CameraPosition, CameraPosition + CameraDir, CameraUp);
+				CameraBufferData.Proj = glm::perspective(FoV, AspectRatio, CameraNear, CameraFar);
+
+				if (bGlobalCullingEnabled)
+				{
+					vec3 FrustumPoints[8] = {};
+					FrustumPoints[0] = CameraPosition + CameraNear*CameraDir + NearHalfWidth*CameraRight + NearHalfHeight*CameraUp; // near right top
+					FrustumPoints[1] = CameraPosition + CameraNear*CameraDir + NearHalfWidth*CameraRight - NearHalfHeight*CameraUp; // near right bot
+					FrustumPoints[2] = CameraPosition + CameraNear*CameraDir - NearHalfWidth*CameraRight + NearHalfHeight*CameraUp; // near left top
+					FrustumPoints[3] = CameraPosition + CameraNear*CameraDir - NearHalfWidth*CameraRight - NearHalfHeight*CameraUp; // naer left bot
+					FrustumPoints[4] = CameraPosition + CameraFar*CameraDir + FarHalfWidth*CameraRight + FarHalfHeight*CameraUp; // far right top
+					FrustumPoints[5] = CameraPosition + CameraFar*CameraDir + FarHalfWidth*CameraRight - FarHalfHeight*CameraUp; // far right bot
+					FrustumPoints[6] = CameraPosition + CameraFar*CameraDir - FarHalfWidth*CameraRight + FarHalfHeight*CameraUp; // far left top
+					FrustumPoints[7] = CameraPosition + CameraFar*CameraDir - FarHalfWidth*CameraRight - FarHalfHeight*CameraUp; // far left bot
+
+					vec3 FrustumPlaneNormals[6] = {};
+					FrustumPlaneNormals[0] = glm::normalize(glm::cross(FrustumPoints[1] - FrustumPoints[0], FrustumPoints[2] - FrustumPoints[0])); // near
+					FrustumPlaneNormals[1] = glm::normalize(glm::cross(FrustumPoints[6] - FrustumPoints[4], FrustumPoints[5] - FrustumPoints[4])); // far
+					FrustumPlaneNormals[2] = glm::normalize(glm::cross(FrustumPoints[4] - FrustumPoints[0], FrustumPoints[1] - FrustumPoints[0])); // right
+					FrustumPlaneNormals[3] = glm::normalize(glm::cross(FrustumPoints[3] - FrustumPoints[2], FrustumPoints[6] - FrustumPoints[2])); // left
+					FrustumPlaneNormals[4] = glm::normalize(glm::cross(FrustumPoints[6] - FrustumPoints[2], FrustumPoints[0] - FrustumPoints[2])); // top
+					FrustumPlaneNormals[5] = glm::normalize(glm::cross(FrustumPoints[5] - FrustumPoints[1], FrustumPoints[3] - FrustumPoints[1])); // bot
+
+					CameraBufferData.Frustums[0] = vec4(FrustumPlaneNormals[0], glm::dot(FrustumPlaneNormals[0], FrustumPoints[0])); // near
+					CameraBufferData.Frustums[1] = vec4(FrustumPlaneNormals[1], glm::dot(FrustumPlaneNormals[1], FrustumPoints[4])); // far
+					CameraBufferData.Frustums[2] = vec4(FrustumPlaneNormals[2], glm::dot(FrustumPlaneNormals[2], FrustumPoints[0])); // right
+					CameraBufferData.Frustums[3] = vec4(FrustumPlaneNormals[3], glm::dot(FrustumPlaneNormals[3], FrustumPoints[2])); // left
+					CameraBufferData.Frustums[4] = vec4(FrustumPlaneNormals[4], glm::dot(FrustumPlaneNormals[4], FrustumPoints[2])); // top
+					CameraBufferData.Frustums[5] = vec4(FrustumPlaneNormals[5], glm::dot(FrustumPlaneNormals[5], FrustumPoints[1])); // bot
+				}
+
 				memcpy(CameraDescriptorSetBindingBuffer.Data, &CameraBufferData, sizeof(CameraBufferData));
 
 				uint32_t ImageIndex = 0;
@@ -1068,7 +1139,8 @@ int main()
 
 				vkCmdBindPipeline(CommandBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, ComputePipeline);
 
-				vkCmdBindDescriptorSets(CommandBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, ComputePipelineLayout, 0, 1, &CullDescriptorSet, 0, 0);
+				VkDescriptorSet ComputeDescriptorSets[] = { CameraDescriptorSet, CullDescriptorSet };
+				vkCmdBindDescriptorSets(CommandBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, ComputePipelineLayout, 0, ArrayCount(ComputeDescriptorSets), ComputeDescriptorSets, 0, 0);
 
 				vkCmdDispatch(CommandBuffer, (ObjectsCount + 31) / 32, 1, 1);
 
@@ -1094,7 +1166,7 @@ int main()
 
 				vkCmdBindPipeline(CommandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, GraphicsPipeline);
 
-				VkDescriptorSet DescriptorSets[] = { CameraDescriptorSet, ObjectsDescriptorSet };
+				VkDescriptorSet DescriptorSets[] = { CameraDescriptorSet, MeshDrawDescriptorSet };
 				vkCmdBindDescriptorSets(CommandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, PipelineLayout, 0, ArrayCount(DescriptorSets), DescriptorSets, 0, 0);
 
 				VkDeviceSize Offset = 0;
@@ -1147,7 +1219,7 @@ int main()
 				FrameGpuTimeAverage = 0.95*FrameGpuTimeAverage + 0.05*FrameGpuTime;
 
 				char Title[256];
-				sprintf(Title, "cpu: %.2f ms; gpu: %.2f ms", FrameCpuTimeAverage, FrameGpuTimeAverage);
+				sprintf(Title, "cpu: %.2f ms; gpu: %.2f ms; culling:%s;", FrameCpuTimeAverage, FrameGpuTimeAverage, bGlobalCullingEnabled ? "ON" : "OFF");
 
 				glfwSetWindowTitle(Window, Title);
 			}
