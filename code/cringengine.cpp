@@ -629,13 +629,14 @@ VkDescriptorSet CreateDescriptorSet(VkDevice Device, VkDescriptorPool Descriptor
 
 void UpdateDescriptorSet(VkDevice Device, VkDescriptorSet DescriptorSet, uint32_t Binding, VkDescriptorType DescriptorType, SBuffer Buffer, VkDeviceSize BufferRange)
 {
+	// TODO: Currently this function can update only one binding at once. Can be better!
 	VkDescriptorBufferInfo BufferInfo = {};
 	BufferInfo.buffer = Buffer.Buffer;
 	BufferInfo.range = BufferRange;
 
 	VkWriteDescriptorSet DescriptorWrite = { VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET };
 	DescriptorWrite.dstSet = DescriptorSet;
-	DescriptorWrite.dstBinding = 0;
+	DescriptorWrite.dstBinding = Binding;
 	DescriptorWrite.descriptorCount = 1;
 	DescriptorWrite.descriptorType = DescriptorType;
 	DescriptorWrite.pBufferInfo = &BufferInfo;
@@ -708,11 +709,9 @@ struct SVertex
 
 struct SMesh
 {
-	uint32_t VertexOffset;
-	uint32_t VertexCount;
-
-	uint32_t IndexOffset;
 	uint32_t IndexCount;
+	uint32_t IndexOffset;
+	uint32_t VertexOffset;
 };
 
 struct SGeometry
@@ -720,6 +719,14 @@ struct SGeometry
 	std::vector<SVertex> Vertices;
 	std::vector<uint32_t> Indices;
 	std::vector<SMesh> Meshes;
+};
+
+struct SMeshDraw
+{
+	uint32_t IndexCount;
+	uint32_t IndexOffset;
+	uint32_t VertexOffset;
+	uint32_t FirstInstance;
 };
 
 void LoadMesh(SGeometry& Geometry, const char* Path)
@@ -783,7 +790,6 @@ void LoadMesh(SGeometry& Geometry, const char* Path)
 
 	SMesh Mesh = {};
 	Mesh.VertexOffset = PrevVertexCount;
-	Mesh.VertexCount = UniqueVertices;
 	Mesh.IndexOffset = PrevIndexCount;
 	Mesh.IndexCount = IndexCount;
 
@@ -878,6 +884,25 @@ VkPipeline CreateGraphicsPipeline(VkDevice Device, VkRenderPass RenderPass, VkPi
 	return GraphicsPipeline;
 }
 
+VkPipeline CreateComputePipeline(VkDevice Device, VkPipelineLayout PipelineLayout, VkShaderModule CS)
+{
+	VkPipelineShaderStageCreateInfo ShaderStage = { VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO };
+	ShaderStage.flags;
+	ShaderStage.stage = VK_SHADER_STAGE_COMPUTE_BIT;
+	ShaderStage.module = CS;
+	ShaderStage.pName = "main";
+	
+	VkComputePipelineCreateInfo CreateInfo = { VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO };
+	CreateInfo.stage = ShaderStage;
+	CreateInfo.layout = PipelineLayout;
+
+	VkPipeline ComputePipeline = 0;
+	VkCheck(vkCreateComputePipelines(Device, 0, 1, &CreateInfo, 0, &ComputePipeline));
+	Assert(ComputePipeline);
+
+	return ComputePipeline;
+}
+
 int main()
 {
 	if (glfwInit())
@@ -925,13 +950,16 @@ int main()
 			SBuffer VertexBuffer = CreateBuffer(MemoryAllocator, 64 * 1024 * 1024, VK_BUFFER_USAGE_VERTEX_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT, VMA_MEMORY_USAGE_GPU_ONLY);
 			SBuffer IndexBuffer = CreateBuffer(MemoryAllocator, 64 * 1024 * 1024, VK_BUFFER_USAGE_INDEX_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT, VMA_MEMORY_USAGE_GPU_ONLY);
 			SBuffer StorageBuffer = CreateBuffer(MemoryAllocator, 64 * 1024 * 1024, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT, VMA_MEMORY_USAGE_GPU_ONLY);
-			SBuffer IndirectBuffer = CreateBuffer(MemoryAllocator, 64 * 1024 * 1024, VK_BUFFER_USAGE_INDIRECT_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT, VMA_MEMORY_USAGE_GPU_ONLY);
+			SBuffer CullingBuffer = CreateBuffer(MemoryAllocator, 64 * 1024 * 1024, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT, VMA_MEMORY_USAGE_GPU_ONLY);
+			SBuffer IndirectBuffer = CreateBuffer(MemoryAllocator, 64 * 1024 * 1024, VK_BUFFER_USAGE_INDIRECT_BUFFER_BIT | VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, VMA_MEMORY_USAGE_GPU_ONLY);
 
+			VkShaderModule CS = LoadShader(Device, "shaders_bytecode\\cull.comp.spv");
 			VkShaderModule VS = LoadShader(Device, "shaders_bytecode\\default.vert.spv");
 			VkShaderModule FS = LoadShader(Device, "shaders_bytecode\\default.frag.spv");
 			
 			VkDescriptorPool DescriptorPool = CreateDescriptorPool(Device);
 
+			// Create graphics pipeline and its descriptors
 			VkDescriptorSetLayoutBinding CameraDescriptorSetLayoutBinding = CreateDescriptorSetLayoutBinding(0, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, VK_SHADER_STAGE_VERTEX_BIT);
 			VkDescriptorSetLayout CameraDescriptorSetLayout = CreateDescriptorSetLayout(Device, 1, &CameraDescriptorSetLayoutBinding);
 
@@ -949,11 +977,27 @@ int main()
 			VkPipelineLayout PipelineLayout = CreatePipelineLayout(Device, ArrayCount(DescriptorSetLayouts), DescriptorSetLayouts);
 			VkPipeline GraphicsPipeline = CreateGraphicsPipeline(Device, RenderPass, PipelineLayout, VS, FS);
 
+			// Create compute pipeline and its descriptors
+			VkDescriptorSetLayoutBinding CullDescriptorSetLayoutBinding = CreateDescriptorSetLayoutBinding(0, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, VK_SHADER_STAGE_COMPUTE_BIT);;
+			VkDescriptorSetLayoutBinding CmdDescriptorSetLayoutBinding = CreateDescriptorSetLayoutBinding(1, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, VK_SHADER_STAGE_COMPUTE_BIT);;
+
+			VkDescriptorSetLayoutBinding ComputeDescriptorSetLayoutBindings[] = { CullDescriptorSetLayoutBinding, CmdDescriptorSetLayoutBinding };
+			VkDescriptorSetLayout ComputeDescriptorSetLayout = CreateDescriptorSetLayout(Device, ArrayCount(ComputeDescriptorSetLayoutBindings), ComputeDescriptorSetLayoutBindings);
+
+			VkDescriptorSet CullDescriptorSet = CreateDescriptorSet(Device, DescriptorPool, ComputeDescriptorSetLayout);
+			UpdateDescriptorSet(Device, CullDescriptorSet, 0, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, CullingBuffer, CullingBuffer.Allocation->GetSize());
+			UpdateDescriptorSet(Device, CullDescriptorSet, 1, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, IndirectBuffer, IndirectBuffer.Allocation->GetSize());
+
+			VkPipelineLayout ComputePipelineLayout = CreatePipelineLayout(Device, 1, &ComputeDescriptorSetLayout);
+			VkPipeline ComputePipeline = CreateComputePipeline(Device, ComputePipelineLayout, CS);
+
 			SGeometry Geometry = {};
 			LoadMesh(Geometry, "meshes\\kitten.obj");
 			LoadMesh(Geometry, "meshes\\bunny.obj");
 
-			const uint32_t ObjectsCount = 10000;
+			uint32_t ObjectsCount = 10000;
+			if (ObjectsCount & 31)
+				ObjectsCount += 32 - (ObjectsCount & 31);
 			std::vector<SObjectTransform> Transforms(ObjectsCount);
 			std::vector<uint32_t> MeshIndices(ObjectsCount);
 
@@ -978,23 +1022,22 @@ int main()
 				Transform.Orientation = glm::rotate(quat(1, 0, 0, 0), Angle, Axis);
 			}
 
-			std::vector<VkDrawIndexedIndirectCommand> IndirectDraws(ObjectsCount);
+			std::vector<SMeshDraw> MeshDraws(ObjectsCount);
 			for (uint32_t I = 0; I < ObjectsCount; I++)
 			{
-				VkDrawIndexedIndirectCommand& Draw = IndirectDraws[I];
+				SMeshDraw& MeshDraw = MeshDraws[I];
 				uint32_t MeshIndex = MeshIndices[I];
 
-				Draw.indexCount = Geometry.Meshes[MeshIndex].IndexCount;
-				Draw.instanceCount = 1;
-				Draw.firstIndex = Geometry.Meshes[MeshIndex].IndexOffset;
-				Draw.vertexOffset = Geometry.Meshes[MeshIndex].VertexOffset;
-				Draw.firstInstance = I;
+				MeshDraw.IndexCount = Geometry.Meshes[MeshIndex].IndexCount;
+				MeshDraw.IndexOffset = Geometry.Meshes[MeshIndex].IndexOffset;
+				MeshDraw.VertexOffset = Geometry.Meshes[MeshIndex].VertexOffset;
+				MeshDraw.FirstInstance = I;
 			}
 
 			UploadBuffer(Device, CommandPool, CommandBuffer, GraphicsQueue, VertexBuffer, StagingBuffer, Geometry.Vertices.data(), Geometry.Vertices.size() * sizeof(SVertex));
 			UploadBuffer(Device, CommandPool, CommandBuffer, GraphicsQueue, IndexBuffer, StagingBuffer, Geometry.Indices.data(), Geometry.Indices.size() * sizeof(uint32_t));
 			UploadBuffer(Device, CommandPool, CommandBuffer, GraphicsQueue, StorageBuffer, StagingBuffer, Transforms.data(), Transforms.size() * sizeof(SObjectTransform));
-			UploadBuffer(Device, CommandPool, CommandBuffer, GraphicsQueue, IndirectBuffer, StagingBuffer, IndirectDraws.data(), IndirectDraws.size() * sizeof(VkDrawIndexedIndirectCommand));
+			UploadBuffer(Device, CommandPool, CommandBuffer, GraphicsQueue, CullingBuffer, StagingBuffer, MeshDraws.data(), MeshDraws.size() * sizeof(SMeshDraw));
 
 			double FrameCpuTimeAverage = 0.0f;
 			double FrameGpuTimeAverage = 0.0f;
@@ -1022,6 +1065,12 @@ int main()
 
 				vkCmdResetQueryPool(CommandBuffer, QueryPool, 0, 2);
 				vkCmdWriteTimestamp(CommandBuffer, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, QueryPool, 0);
+
+				vkCmdBindPipeline(CommandBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, ComputePipeline);
+
+				vkCmdBindDescriptorSets(CommandBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, ComputePipelineLayout, 0, 1, &CullDescriptorSet, 0, 0);
+
+				vkCmdDispatch(CommandBuffer, (ObjectsCount + 31) / 32, 1, 1);
 
 				VkViewport Viewport = { 0.0f, float(Swapchain.Height), float(Swapchain.Width), -float(Swapchain.Height), 0.0f, 1.0f };
 				VkRect2D Scissor = { {0, 0}, {Swapchain.Width, Swapchain.Height} };

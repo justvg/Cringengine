@@ -130,7 +130,10 @@
     </ClInclude>
   </ItemGroup>
   <ItemGroup>
-    <None Include="code\shaders\default.vert.glsl" />
-    <None Include="code\shaders\default.frag.glsl" />
+    <CustomBuild Include="code\shaders\default.frag.glsl" />
+    <CustomBuild Include="code\shaders\default.vert.glsl" />
+  </ItemGroup>
+  <ItemGroup>
+    <None Include="code\shaders\cull.comp.glsl" />
   </ItemGroup>
 </Project>
