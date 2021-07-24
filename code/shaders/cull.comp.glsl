@@ -134,7 +134,9 @@ void main()
 			vec4 MinObjectCameraSpace = PrevView * vec4(Center.xy, Center.z + Radius, 1.0);
 			float MinObjectDepth = ProjectPoint(MinObjectCameraSpace.xyz).z;
 
-			bVisible = bVisible && (MinObjectDepth < MaxDepth);
+			// Some objects cull themselves, mb because of some precision issues, so I add this bias
+			float Bias = 0.0001;
+			bVisible = bVisible && (MinObjectDepth < MaxDepth + Bias);
 		}
 	}
 

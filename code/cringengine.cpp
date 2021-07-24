@@ -1244,7 +1244,7 @@ int main()
 			VkDescriptorSet CullDescriptorSet = CreateDescriptorSet(Device, DescriptorPool, ComputeDescriptorSetLayout);
 			UpdateDescriptorSetBuffer(Device, CullDescriptorSet, 0, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, MeshDrawBuffer, MeshDrawBuffer.Allocation->GetSize());
 			UpdateDescriptorSetBuffer(Device, CullDescriptorSet, 1, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, IndirectBuffer, IndirectBuffer.Allocation->GetSize());
-			UpdateDescriptorSetBuffer(Device, CullDescriptorSet, 2, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, CountBuffer, CountBuffer.Allocation->GetSize());
+			UpdateDescriptorSetBuffer(Device, CullDescriptorSet, 2, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, CountBuffer, sizeof(uint32_t));
 
 			VkDescriptorSetLayoutBinding HiZDescriptorSetLayoutBinding = CreateDescriptorSetLayoutBinding(0, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, VK_SHADER_STAGE_COMPUTE_BIT);;
 			VkDescriptorSetLayout HiDepthDescriptorSetLayout = CreateDescriptorSetLayout(Device, 1, &HiZDescriptorSetLayoutBinding);
